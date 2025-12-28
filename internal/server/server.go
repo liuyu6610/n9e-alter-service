@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,8 +37,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/alerts", s.handleAlerts)
 	mux.HandleFunc("/api/v1/alerts/get", s.handleAlertGet)
 
-	fs := http.FileServer(http.Dir(s.cfg.WebDir))
-	mux.Handle("/", fs)
+	mux.Handle("/", s.spaHandler())
 	return mux
 }
 
@@ -52,11 +54,20 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	type notifyItem struct {
+		Enabled               bool `json:"enabled"`
+		ObserveSeconds        int  `json:"observe_seconds"`
+		RepeatIntervalSeconds int  `json:"repeat_interval_seconds"`
+		SendRecovered         bool `json:"send_recovered"`
+	}
+
 	type routeItem struct {
-		Name               string `json:"name"`
-		Enabled            bool   `json:"enabled"`
-		NotifyEnabled      bool   `json:"notify_enabled"`
-		DailyReportEnabled bool   `json:"daily_report_enabled"`
+		Name        string                   `json:"name"`
+		Enabled     bool                     `json:"enabled"`
+		Match       config.RouteMatchConfig  `json:"match"`
+		Dedup       config.DedupConfig       `json:"dedup"`
+		Notify      notifyItem               `json:"notify"`
+		DailyReport config.DailyReportConfig `json:"daily_report"`
 	}
 
 	items := make([]routeItem, 0, len(s.cfg.Routes))
@@ -67,16 +78,62 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 			name = "route-" + strconv.Itoa(i)
 		}
 		items = append(items, routeItem{
-			Name:               name,
-			Enabled:            rc.Enabled,
-			NotifyEnabled:      rc.Notify.Enabled,
-			DailyReportEnabled: rc.DailyReport.Enabled,
+			Name:    name,
+			Enabled: rc.Enabled,
+			Match:   rc.Match,
+			Dedup:   rc.Dedup,
+			Notify: notifyItem{
+				Enabled:               rc.Notify.Enabled,
+				ObserveSeconds:        rc.Notify.ObserveSeconds,
+				RepeatIntervalSeconds: rc.Notify.RepeatIntervalSeconds,
+				SendRecovered:         rc.Notify.SendRecovered,
+			},
+			DailyReport: rc.DailyReport,
 		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"time":  time.Now().UTC().Format(time.RFC3339),
 		"items": items,
+	})
+}
+
+func (s *Server) spaHandler() http.Handler {
+	fs := http.FileServer(http.Dir(s.cfg.WebDir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "" {
+			p = "/"
+		}
+		clean := path.Clean(p)
+		if clean == "." {
+			clean = "/"
+		}
+		rel := strings.TrimPrefix(clean, "/")
+		if rel != "" {
+			full := filepath.Join(s.cfg.WebDir, filepath.FromSlash(rel))
+			st, err := os.Stat(full)
+			if err == nil {
+				if !st.IsDir() {
+					fs.ServeHTTP(w, r)
+					return
+				}
+
+				idx := filepath.Join(full, "index.html")
+				if fi, err := os.Stat(idx); err == nil && !fi.IsDir() {
+					fs.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		indexPath := filepath.Join(s.cfg.WebDir, "index.html")
+		if _, err := os.Stat(indexPath); err == nil {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+
+		fs.ServeHTTP(w, r)
 	})
 }
 

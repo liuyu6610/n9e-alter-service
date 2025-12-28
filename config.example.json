@@ -1,6 +1,6 @@
 {
   "addr": ":8080",
-  "web_dir": "web",
+  "web_dir": "web/dist",
   "data_dir": "data",
   "n9e": {
     "base_url": "https://nightingale.example.com",

@@ -114,7 +114,7 @@ type DailyReportConfig struct {
 func Default() Config {
 	return Config{
 		Addr:    ":8080",
-		WebDir:  "web",
+		WebDir:  "web/dist",
 		DataDir: "data",
 		N9E: N9EConfig{
 			BaseURL:        "",
