@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>n9e-alter-service</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background: #f5f7fa; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body>
+  <div id="app" style="height:100%"></div>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/element-plus/dist/index.full.min.js"></script>
+  <script>
+    const { createApp, ref, reactive, computed, onMounted, watch } = Vue;
+
+    function fmtTs(ts) {
+      if (!ts) return '-';
+      const d = new Date(ts * 1000);
+      if (isNaN(d.getTime())) return String(ts);
+      const pad = (n) => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }
+
+    const App = {
+      setup() {
+        const statusLoading = ref(false);
+        const listLoading = ref(false);
+        const pullLoading = ref(false);
+        const routesLoading = ref(false);
+
+        const health = reactive({ ok: false, text: 'unknown' });
+        const engineOk = ref(true);
+        const engineErr = ref('');
+
+        const summary = reactive({ active: 0, recovered: 0, total: 0 });
+        const engine = reactive({ last_end_unix: 0, last_error: '' });
+
+        const routes = ref([]);
+        const routeOptions = computed(() => {
+          const xs = routes.value || [];
+          return xs.filter(x => x && x.enabled).map(x => ({ label: x.name, value: x.name }));
+        });
+
+        const q = reactive({
+          status: 'active',
+          route: '',
+          page: 1,
+          pageSize: 100,
+        });
+
+        const table = ref([]);
+        const total = ref(0);
+
+        const drawer = reactive({ open: false, loading: false, item: null });
+
+        async function apiGet(url) {
+          const resp = await fetch(url, { cache: 'no-store' });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            const msg = data && data.error ? data.error : ('http ' + resp.status);
+            throw new Error(msg);
+          }
+          return data;
+        }
+
+        async function apiPost(url) {
+          const resp = await fetch(url, { method: 'POST' });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            const msg = data && data.error ? data.error : ('http ' + resp.status);
+            throw new Error(msg);
+          }
+          return data;
+        }
+
+        async function refreshHealth() {
+          try {
+            const data = await apiGet('/healthz');
+            health.ok = true;
+            health.text = data.status || 'ok';
+          } catch (e) {
+            health.ok = false;
+            health.text = 'error';
+          }
+        }
+
+        async function refreshRoutes() {
+          routesLoading.value = true;
+          try {
+            const data = await apiGet('/api/v1/routes');
+            routes.value = data.items || [];
+          } catch (e) {
+            if (ElementPlus && ElementPlus.ElMessage) {
+              ElementPlus.ElMessage.error('routes: ' + e.message);
+            }
+          } finally {
+            routesLoading.value = false;
+          }
+        }
+
+        async function refreshStatus() {
+          statusLoading.value = true;
+          try {
+            const data = await apiGet('/api/v1/status');
+            const st = data.state || {};
+            summary.active = st.active || 0;
+            summary.recovered = st.recovered || 0;
+            summary.total = st.total || 0;
+
+            const eng = data.engine || {};
+            engine.last_end_unix = eng.last_end_unix || 0;
+            engine.last_error = eng.last_error || '';
+            engineErr.value = engine.last_error;
+            engineOk.value = !engine.last_error;
+          } catch (e) {
+            engineOk.value = false;
+            engineErr.value = e.message;
+          } finally {
+            statusLoading.value = false;
+          }
+        }
+
+        async function refreshList() {
+          listLoading.value = true;
+          try {
+            const offset = (q.page - 1) * q.pageSize;
+            const usp = new URLSearchParams();
+            usp.set('status', q.status);
+            usp.set('offset', String(offset));
+            usp.set('limit', String(q.pageSize));
+            if (q.route) usp.set('route', q.route);
+            const data = await apiGet('/api/v1/alerts?' + usp.toString());
+            table.value = data.items || [];
+            total.value = data.total || 0;
+          } catch (e) {
+            table.value = [];
+            total.value = 0;
+            if (ElementPlus && ElementPlus.ElMessage) {
+              ElementPlus.ElMessage.error('alerts: ' + e.message);
+            }
+          } finally {
+            listLoading.value = false;
+          }
+        }
+
+        async function runPull() {
+          pullLoading.value = true;
+          try {
+            await apiPost('/api/v1/pull/run');
+            if (ElementPlus && ElementPlus.ElMessage) {
+              ElementPlus.ElMessage.success('pull ok');
+            }
+          } catch (e) {
+            if (ElementPlus && ElementPlus.ElMessage) {
+              ElementPlus.ElMessage.error('pull: ' + e.message);
+            }
+          } finally {
+            pullLoading.value = false;
+            await refreshStatus();
+            await refreshList();
+          }
+        }
+
+        async function openDetail(row) {
+          if (!row || !row.service_hash) return;
+          drawer.open = true;
+          drawer.loading = true;
+          drawer.item = null;
+          try {
+            const data = await apiGet('/api/v1/alerts/get?hash=' + encodeURIComponent(row.service_hash));
+            drawer.item = data.item || null;
+          } catch (e) {
+            if (ElementPlus && ElementPlus.ElMessage) {
+              ElementPlus.ElMessage.error('detail: ' + e.message);
+            }
+          } finally {
+            drawer.loading = false;
+          }
+        }
+
+        watch(() => [q.status, q.route, q.pageSize], async () => {
+          q.page = 1;
+          await refreshList();
+        });
+
+        onMounted(async () => {
+          await refreshHealth();
+          await refreshRoutes();
+          await refreshStatus();
+          await refreshList();
+          setInterval(refreshHealth, 10000);
+          setInterval(refreshStatus, 10000);
+        });
+
+        return {
+          statusLoading,
+          listLoading,
+          pullLoading,
+          routesLoading,
+          health,
+          engineOk,
+          engineErr,
+          summary,
+          engine,
+          routes,
+          routeOptions,
+          q,
+          table,
+          total,
+          drawer,
+          fmtTs,
+          refreshList,
+          runPull,
+          openDetail,
+        };
+      },
+      template: `
+        <el-container style="height:100%">
+          <el-header style="background:#fff;border-bottom:1px solid #ebeef5;display:flex;align-items:center;justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="font-weight:700">n9e-alter-service</div>
+              <el-tag :type="health.ok ? 'success' : 'danger'">health: {{health.text}}</el-tag>
+              <el-tag :type="engineOk ? 'success' : 'danger'">engine: {{engineOk ? 'ok' : 'error'}}</el-tag>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <el-button type="primary" :loading="pullLoading" @click="runPull">手动拉取</el-button>
+            </div>
+          </el-header>
+
+          <el-main style="padding:16px">
+            <el-row :gutter="12">
+              <el-col :span="6">
+                <el-card shadow="never">
+                  <div style="font-size:12px;color:#909399">Active</div>
+                  <div style="font-size:22px;font-weight:700">{{summary.active}}</div>
+                </el-card>
+              </el-col>
+              <el-col :span="6">
+                <el-card shadow="never">
+                  <div style="font-size:12px;color:#909399">Recovered</div>
+                  <div style="font-size:22px;font-weight:700">{{summary.recovered}}</div>
+                </el-card>
+              </el-col>
+              <el-col :span="6">
+                <el-card shadow="never">
+                  <div style="font-size:12px;color:#909399">Last Pull</div>
+                  <div style="font-size:14px;font-weight:600" class="mono">{{fmtTs(engine.last_end_unix)}}</div>
+                </el-card>
+              </el-col>
+              <el-col :span="6">
+                <el-card shadow="never">
+                  <div style="font-size:12px;color:#909399">Last Error</div>
+                  <div style="font-size:12px;color:#f56c6c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="engineErr">{{engineErr || '-'}}</div>
+                </el-card>
+              </el-col>
+            </el-row>
+
+            <el-card shadow="never" style="margin-top:12px">
+              <el-row :gutter="10" style="margin-bottom:12px" align="middle">
+                <el-col :span="6">
+                  <el-select v-model="q.route" filterable clearable placeholder="route" style="width:100%" :loading="routesLoading">
+                    <el-option v-for="it in routeOptions" :key="it.value" :label="it.label" :value="it.value" />
+                  </el-select>
+                </el-col>
+                <el-col :span="6">
+                  <el-radio-group v-model="q.status">
+                    <el-radio-button label="active">Active</el-radio-button>
+                    <el-radio-button label="recovered">Recovered</el-radio-button>
+                  </el-radio-group>
+                </el-col>
+                <el-col :span="6">
+                  <el-input-number v-model="q.pageSize" :min="10" :max="100000" :step="10" />
+                </el-col>
+                <el-col :span="6" style="text-align:right">
+                  <el-button :loading="listLoading" @click="refreshList">刷新列表</el-button>
+                </el-col>
+              </el-row>
+
+              <el-table :data="table" stripe style="width:100%" v-loading="listLoading" @row-dblclick="openDetail" row-key="service_hash">
+                <el-table-column prop="severity" label="P" width="60">
+                  <template #default="scope">
+                    <span class="mono">P{{scope.row.severity}}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="group_name" label="业务组" width="180" show-overflow-tooltip />
+                <el-table-column prop="rule_name" label="规则" show-overflow-tooltip />
+                <el-table-column prop="entity" label="对象" show-overflow-tooltip />
+                <el-table-column prop="raw_count" label="计数" width="80" />
+                <el-table-column prop="first_seen_at" label="首次发现" width="160">
+                  <template #default="scope">
+                    <span class="mono">{{fmtTs(scope.row.first_seen_at)}}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="last_seen_at" label="最新发现" width="160">
+                  <template #default="scope">
+                    <span class="mono">{{fmtTs(scope.row.last_seen_at)}}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="last_trigger_time" label="最新触发" width="160">
+                  <template #default="scope">
+                    <span class="mono">{{fmtTs(scope.row.last_trigger_time)}}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="service_hash" label="Hash" width="220" show-overflow-tooltip>
+                  <template #default="scope">
+                    <span class="mono">{{(scope.row.service_hash || '').slice(0, 16)}}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div style="display:flex;justify-content:flex-end;margin-top:12px">
+                <el-pagination
+                  background
+                  layout="total, sizes, prev, pager, next"
+                  :total="total"
+                  v-model:current-page="q.page"
+                  v-model:page-size="q.pageSize"
+                  :page-sizes="[10,20,50,100,200,500,1000]"
+                  @current-change="refreshList"
+                  @size-change="refreshList"
+                />
+              </div>
+            </el-card>
+
+            <el-drawer v-model="drawer.open" title="事件详情" size="50%">
+              <div v-if="drawer.loading">loading...</div>
+              <pre v-else class="mono" style="white-space:pre-wrap">{{drawer.item ? JSON.stringify(drawer.item, null, 2) : 'empty'}}</pre>
+            </el-drawer>
+          </el-main>
+        </el-container>
+      `,
+    };
+
+    createApp(App).use(ElementPlus).mount('#app');
+  </script>
+</body>
+</html>

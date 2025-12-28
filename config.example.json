@@ -1,0 +1,81 @@
+{
+  "addr": ":8080",
+  "web_dir": "web",
+  "data_dir": "data",
+  "n9e": {
+    "base_url": "https://nightingale.example.com",
+    "api_path": "/api/n9e/alert-cur-events/list",
+    "user_token": "",
+    "authorization": "",
+    "timeout_seconds": 10,
+    "verify_tls": true
+  },
+  "pull": {
+    "interval_seconds": 30,
+    "page_limit": 200,
+    "max_pages": 2000,
+    "my_groups": false,
+    "hours": 0,
+    "stime": 0,
+    "etime": 0,
+    "query": "",
+    "severity": "",
+    "prods": "",
+    "rule_prods": "",
+    "cate": "",
+    "rid": 0,
+    "event_ids": ""
+  },
+  "state": {
+    "snapshot_file": "data/state.json",
+    "snapshot_interval_seconds": 30,
+    "retain_recovered_seconds": 86400,
+    "recover_miss_count": 1
+  },
+  "dingtalk": {
+    "webhook": "",
+    "secret": "",
+    "keyword": ""
+  },
+  "routes": [
+    {
+      "name": "default",
+      "enabled": true,
+      "match": {
+        "group_name_regex": ".*",
+        "rule_name_regex": ".*",
+        "severity_in": []
+      },
+      "dedup": {
+        "mode": "n9e_hash",
+        "include_group_id": true,
+        "include_group_name": true,
+        "include_rule_id": true,
+        "include_rule_name": true,
+        "include_severity": true,
+        "include_entity": true,
+        "normalize_pod_name": false,
+        "rewrites": []
+      },
+      "notify": {
+        "enabled": false,
+        "dingtalk": {
+          "webhook": "",
+          "secret": "",
+          "keyword": ""
+        },
+        "observe_seconds": 0,
+        "repeat_interval_seconds": 3600,
+        "send_recovered": true
+      },
+      "daily_report": {
+        "enabled": false,
+        "cron": "0 18 * * *",
+        "title_prefix": "N9E 告警日报",
+        "max_lines": 50,
+        "max_chars": 15000,
+        "clear_mode": "reset_notified"
+      }
+    }
+  ]
+}
