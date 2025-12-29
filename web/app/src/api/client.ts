@@ -1,6 +1,7 @@
 import type {
   AlertGetResponse,
   AlertsResponse,
+  PreviewResponse,
   RoutesResponse,
   StatusResponse,
 } from './types'
@@ -45,6 +46,14 @@ export function getAlert(hash: string): Promise<AlertGetResponse> {
   const usp = new URLSearchParams()
   usp.set('hash', hash)
   return requestJson<AlertGetResponse>(`/api/v1/alerts/get?${usp.toString()}`)
+}
+
+export function previewRoutes(payload: any): Promise<PreviewResponse> {
+  return requestJson<PreviewResponse>('/api/v1/routes/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function getHealth(): Promise<{ status: string; time: string }> {

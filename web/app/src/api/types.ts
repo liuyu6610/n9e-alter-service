@@ -98,6 +98,7 @@ export interface RecordItem {
   rule_name: string
   severity: number
   entity: string
+  tags?: Record<string, string>
   first_trigger_time: number
   last_trigger_time: number
   raw_count: number
@@ -114,4 +115,37 @@ export interface AlertsResponse {
 export interface AlertGetResponse {
   time: string
   item: RecordItem
+}
+
+export interface PreviewBindingItem {
+  name: string
+  priority: number
+}
+
+export interface PreviewItem {
+  n9e_hash: string
+  n9e_id: number
+  group_id: number
+  rule_id: number
+  severity: number
+  tags?: Record<string, string>
+
+  route_name: string
+  dedup_key: string
+  service_hash: string
+
+  group_name_before: string
+  group_name_after: string
+  rule_name_before: string
+  rule_name_after: string
+  entity_before: string
+  entity_after: string
+
+  matched_bindings?: PreviewBindingItem[]
+  final_robot_ids?: string[]
+}
+
+export interface PreviewResponse {
+  time: string
+  items: PreviewItem[]
 }

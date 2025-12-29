@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
 import Alerts from '../views/Alerts.vue'
 import Routes from '../views/Routes.vue'
+import Preview from '../views/Preview.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -10,6 +11,7 @@ const router = createRouter({
     { path: '/', name: 'Dashboard', component: Dashboard },
     { path: '/alerts', name: 'Alerts', component: Alerts },
     { path: '/routes', name: 'Routes', component: Routes },
+    { path: '/preview', name: 'Preview', component: Preview },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

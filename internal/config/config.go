@@ -16,10 +16,43 @@ type Config struct {
 
 	N9E   N9EConfig   `json:"n9e"`
 	Pull  PullConfig  `json:"pull"`
+	Push  PushConfig  `json:"push"`
 	State StateConfig `json:"state"`
 
 	DingTalk DingTalkConfig `json:"dingtalk"`
 	Routes   []RouteConfig  `json:"routes"`
+	Robots   []RobotConfig  `json:"robots"`
+	Bindings []BindingRule  `json:"bindings"`
+}
+
+type PushConfig struct {
+	Enabled             bool   `json:"enabled"`
+	Token               string `json:"token"`
+	QueueSize           int    `json:"queue_size"`
+	WorkerCount         int    `json:"worker_count"`
+	EnqueueTimeoutMilli int    `json:"enqueue_timeout_milli"`
+}
+
+type RobotConfig struct {
+	ID      string `json:"id"`
+	Webhook string `json:"webhook"`
+	Secret  string `json:"secret"`
+	Keyword string `json:"keyword"`
+}
+
+type BindingRule struct {
+	Name           string            `json:"name"`
+	Priority       int               `json:"priority"`
+	Enabled        bool              `json:"enabled"`
+	RobotID        string            `json:"robot_id"`
+	RobotIDs       []string          `json:"robot_ids"`
+	GroupID        int64             `json:"group_id"`
+	GroupNameRegex string            `json:"group_name_regex"`
+	RuleID         int64             `json:"rule_id"`
+	RuleNameRegex  string            `json:"rule_name_regex"`
+	RouteName      string            `json:"route_name"`
+	Tags           map[string]string `json:"tags"`
+	TagRegex       map[string]string `json:"tag_regex"`
 }
 
 type N9EConfig struct {
@@ -97,6 +130,7 @@ type RewriteRule struct {
 type NotifyConfig struct {
 	Enabled               bool           `json:"enabled"`
 	DingTalk              DingTalkConfig `json:"dingtalk"`
+	RobotID               string         `json:"robot_id"`
 	ObserveSeconds        int            `json:"observe_seconds"`
 	RepeatIntervalSeconds int            `json:"repeat_interval_seconds"`
 	SendRecovered         bool           `json:"send_recovered"`
@@ -140,6 +174,13 @@ func Default() Config {
 			Rid:             0,
 			EventIDs:        "",
 		},
+		Push: PushConfig{
+			Enabled:             false,
+			Token:               "",
+			QueueSize:           20000,
+			WorkerCount:         8,
+			EnqueueTimeoutMilli: 30000,
+		},
 		State: StateConfig{
 			SnapshotFile:            "",
 			SnapshotIntervalSeconds: 30,
@@ -170,6 +211,7 @@ func Default() Config {
 				Notify: NotifyConfig{
 					Enabled:               false,
 					DingTalk:              DingTalkConfig{},
+					RobotID:               "",
 					ObserveSeconds:        0,
 					RepeatIntervalSeconds: 3600,
 					SendRecovered:         true,
@@ -184,6 +226,8 @@ func Default() Config {
 				},
 			},
 		},
+		Robots:   nil,
+		Bindings: nil,
 	}
 }
 
@@ -242,6 +286,27 @@ func Load(path string) (Config, error) {
 	if v := strings.TrimSpace(os.Getenv("PULL_INTERVAL_SECONDS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Pull.IntervalSeconds = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("PUSH_ENABLED")); v != "" {
+		cfg.Push.Enabled = !(v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no"))
+	}
+	if v := strings.TrimSpace(os.Getenv("PUSH_TOKEN")); v != "" {
+		cfg.Push.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv("PUSH_QUEUE_SIZE")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Push.QueueSize = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("PUSH_WORKER_COUNT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Push.WorkerCount = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("PUSH_ENQUEUE_TIMEOUT_MILLI")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Push.EnqueueTimeoutMilli = n
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv("STATE_SNAPSHOT_FILE")); v != "" {

@@ -39,6 +39,7 @@ type Record struct {
 	RuleName  string `json:"rule_name"`
 	Severity  int    `json:"severity"`
 	Entity    string `json:"entity"`
+	Tags      map[string]string `json:"tags"`
 
 	FirstTriggerTime int64 `json:"first_trigger_time"`
 	LastTriggerTime  int64 `json:"last_trigger_time"`
@@ -59,6 +60,7 @@ type InputEvent struct {
 	RuleName  string
 	Severity  int
 	Entity    string
+	Tags      map[string]string
 
 	FirstTriggerTime int64
 	LastTriggerTime  int64
@@ -124,6 +126,108 @@ func (s *Store) LoadFromFile(path string) error {
 	s.rev = 0
 	s.dirty = false
 	return nil
+}
+
+func (s *Store) ApplyIngest(now time.Time, items []InputEvent) ApplyResult {
+	nowUnix := now.Unix()
+
+	seen := make(map[string]InputEvent, len(items))
+	for _, it := range items {
+		if stringsTrim(it.ServiceHash) == "" {
+			continue
+		}
+		seen[it.ServiceHash] = it
+	}
+
+	res := ApplyResult{NowUnix: nowUnix, Seen: len(seen)}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for h, it := range seen {
+		r, ok := s.records[h]
+		if !ok || r == nil {
+			nr := &Record{
+				ServiceHash:      h,
+				RouteName:        it.RouteName,
+				DedupKey:         it.DedupKey,
+				Status:           StatusActive,
+				FirstSeenAt:      nowUnix,
+				LastSeenAt:       nowUnix,
+				MissCount:        0,
+				RecoveredAt:      0,
+				LastNotified:     0,
+				N9EHash:          it.N9EHash,
+				N9EID:            it.N9EID,
+				GroupID:          it.GroupID,
+				GroupName:        it.GroupName,
+				RuleID:           it.RuleID,
+				RuleName:         it.RuleName,
+				Severity:         it.Severity,
+				Entity:           it.Entity,
+				Tags:             cloneTags(it.Tags),
+				FirstTriggerTime: it.FirstTriggerTime,
+				LastTriggerTime:  it.LastTriggerTime,
+				RawCount:         it.RawCount,
+			}
+			s.records[h] = nr
+			res.NewActives = append(res.NewActives, *nr)
+			s.markDirtyLocked()
+			continue
+		}
+
+		if r.Status == StatusRecovered {
+			r.Status = StatusActive
+			r.FirstSeenAt = nowUnix
+			r.RecoveredAt = 0
+			r.LastNotified = 0
+			r.MissCount = 0
+			res.NewActives = append(res.NewActives, *r)
+			s.markDirtyLocked()
+		}
+
+		r.RouteName = it.RouteName
+		r.DedupKey = it.DedupKey
+		r.LastSeenAt = nowUnix
+		r.MissCount = 0
+
+		r.N9EHash = it.N9EHash
+		r.N9EID = it.N9EID
+		r.GroupID = it.GroupID
+		r.GroupName = it.GroupName
+		r.RuleID = it.RuleID
+		r.RuleName = it.RuleName
+		r.Severity = it.Severity
+		r.Entity = it.Entity
+		r.Tags = cloneTags(it.Tags)
+
+		r.RawCount = it.RawCount
+		if r.FirstTriggerTime == 0 || (it.FirstTriggerTime > 0 && it.FirstTriggerTime < r.FirstTriggerTime) {
+			r.FirstTriggerTime = it.FirstTriggerTime
+		}
+		if it.LastTriggerTime > r.LastTriggerTime {
+			r.LastTriggerTime = it.LastTriggerTime
+		}
+
+		s.markDirtyLocked()
+	}
+
+	active := 0
+	recovered := 0
+	for _, r := range s.records {
+		if r == nil {
+			continue
+		}
+		if r.Status == StatusActive {
+			active++
+		} else if r.Status == StatusRecovered {
+			recovered++
+		}
+	}
+
+	res.ActiveTotal = active
+	res.RecoveredTotal = recovered
+	return res
 }
 
 func (s *Store) SaveToFile(path string) error {
@@ -224,6 +328,7 @@ func (s *Store) ApplyPull(now time.Time, items []InputEvent, opt ApplyOptions) A
 				RuleName:         it.RuleName,
 				Severity:         it.Severity,
 				Entity:           it.Entity,
+				Tags:             cloneTags(it.Tags),
 				FirstTriggerTime: it.FirstTriggerTime,
 				LastTriggerTime:  it.LastTriggerTime,
 				RawCount:         it.RawCount,
@@ -257,6 +362,7 @@ func (s *Store) ApplyPull(now time.Time, items []InputEvent, opt ApplyOptions) A
 		r.RuleName = it.RuleName
 		r.Severity = it.Severity
 		r.Entity = it.Entity
+		r.Tags = cloneTags(it.Tags)
 
 		r.RawCount = it.RawCount
 		if r.FirstTriggerTime == 0 || (it.FirstTriggerTime > 0 && it.FirstTriggerTime < r.FirstTriggerTime) {
@@ -570,4 +676,15 @@ func stringsTrim(s string) string {
 func (s *Store) markDirtyLocked() {
 	s.dirty = true
 	s.rev++
+}
+
+func cloneTags(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

@@ -17,6 +17,7 @@ type DailyReporter struct {
 	cfg config.Config
 	st  *state.Store
 	dt  *dingtalk.Client
+	rr  *RobotResolver
 }
 
 func NewDailyReporter(cfg config.Config, st *state.Store) *DailyReporter {
@@ -24,7 +25,7 @@ func NewDailyReporter(cfg config.Config, st *state.Store) *DailyReporter {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &DailyReporter{cfg: cfg, st: st, dt: dingtalk.New(timeout)}
+	return &DailyReporter{cfg: cfg, st: st, dt: dingtalk.New(timeout), rr: NewRobotResolver(cfg)}
 }
 
 func (d *DailyReporter) Start(ctx context.Context) {
@@ -38,10 +39,7 @@ func (d *DailyReporter) Start(ctx context.Context) {
 		}
 
 		routeName := normalizeRouteName(rc.Name, i)
-		dtCfg := mergeDingTalk(d.cfg.DingTalk, rc.Notify.DingTalk)
-		if strings.TrimSpace(dtCfg.Webhook) == "" {
-			continue
-		}
+		globalCfg := mergeDingTalk(d.cfg.DingTalk, rc.Notify.DingTalk)
 
 		sched, err := scheduler.Parse(rc.DailyReport.Cron)
 		if err != nil {
@@ -50,11 +48,11 @@ func (d *DailyReporter) Start(ctx context.Context) {
 		}
 
 		rc2 := rc
-		go d.runRoute(ctx, routeName, dtCfg, sched, rc2)
+		go d.runRoute(ctx, routeName, globalCfg, sched, rc2)
 	}
 }
 
-func (d *DailyReporter) runRoute(ctx context.Context, routeName string, dtCfg dingtalk.Config, sched scheduler.Schedule, rc config.RouteConfig) {
+func (d *DailyReporter) runRoute(ctx context.Context, routeName string, globalCfg dingtalk.Config, sched scheduler.Schedule, rc config.RouteConfig) {
 	for {
 		next := sched.Next(time.Now())
 		if next.IsZero() {
@@ -76,15 +74,60 @@ func (d *DailyReporter) runRoute(ctx context.Context, routeName string, dtCfg di
 		case <-timer.C:
 		}
 
-		d.runOnce(routeName, dtCfg, rc)
+		d.runOnce(routeName, globalCfg, rc)
 	}
 }
 
-func (d *DailyReporter) runOnce(routeName string, dtCfg dingtalk.Config, rc config.RouteConfig) {
+func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc config.RouteConfig) {
 	items, total := d.st.List(state.StatusActive, routeName, 0, 100000)
-	title, text := report.BuildActiveMarkdown(rc.DailyReport.TitlePrefix, routeName, items, total, rc.DailyReport.MaxLines, rc.DailyReport.MaxChars)
-	if err := d.dt.SendMarkdown(dtCfg, title, text); err != nil {
-		log.Printf("daily report route=%s err=%v", routeName, err)
+	if len(items) == 0 {
+		return
+	}
+
+	// 日报按记录选择机器人：同一日报路由内可能分流到不同群/机器人，避免“发错群”。
+	by := map[string]*struct {
+		cfgs  []dingtalk.Config
+		items []state.Record
+	}{}
+	for _, it := range items {
+		cfgs, _ := d.rr.ResolveForRecord(it, routeName, rc.Notify.RobotID, globalCfg)
+		key := robotsKey(cfgs)
+		b := by[key]
+		if b == nil {
+			b = &struct {
+				cfgs  []dingtalk.Config
+				items []state.Record
+			}{cfgs: cfgs, items: make([]state.Record, 0, 8)}
+			by[key] = b
+		}
+		b.items = append(b.items, it)
+	}
+
+	keys := make([]string, 0, len(by))
+	for k := range by {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	sent := false
+	for _, k := range keys {
+		b := by[k]
+		if b == nil || len(b.cfgs) == 0 {
+			continue
+		}
+		for _, dtCfg := range b.cfgs {
+			if strings.TrimSpace(dtCfg.Webhook) == "" {
+				continue
+			}
+			title, text := report.BuildActiveMarkdown(rc.DailyReport.TitlePrefix, routeName, b.items, total, rc.DailyReport.MaxLines, rc.DailyReport.MaxChars)
+			if err := d.dt.SendMarkdown(dtCfg, title, text); err != nil {
+				log.Printf("daily report route=%s err=%v", routeName, err)
+				continue
+			}
+			sent = true
+		}
+	}
+	if !sent {
 		return
 	}
 

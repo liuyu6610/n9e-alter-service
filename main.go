@@ -12,6 +12,7 @@ import (
 
 	"n9e-alter-service/internal/config"
 	"n9e-alter-service/internal/engine"
+	"n9e-alter-service/internal/ingest"
 	"n9e-alter-service/internal/server"
 	"n9e-alter-service/internal/state"
 	"n9e-alter-service/internal/workers"
@@ -55,8 +56,12 @@ func main() {
 		log.Fatalf("init engine: %v", err)
 	}
 
+	ing := ingest.New(cfg.Push, eng, st)
+
 	rootCtx, cancelRoot := context.WithCancel(context.Background())
 	defer cancelRoot()
+
+	ing.Start(rootCtx)
 
 	startPullLoop(rootCtx, cfg, eng)
 	startSnapshotLoop(rootCtx, cfg, st)
@@ -67,7 +72,7 @@ func main() {
 	daily := workers.NewDailyReporter(cfg, st)
 	daily.Start(rootCtx)
 
-	s := server.New(cfg, eng, st)
+	s := server.New(cfg, eng, st, ing)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,

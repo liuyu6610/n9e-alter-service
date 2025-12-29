@@ -134,6 +134,77 @@ func (e *Engine) Status() Status {
 	return st
 }
 
+func (e *Engine) BuildInputEvents(evs []n9e.CurEvent) []state.InputEvent {
+	return e.buildInputs(evs)
+}
+
+type PreviewItem struct {
+	N9EHash string            `json:"n9e_hash"`
+	N9EID   int64             `json:"n9e_id"`
+	GroupID int64             `json:"group_id"`
+	RuleID  int64             `json:"rule_id"`
+	Severity int              `json:"severity"`
+	Tags    map[string]string `json:"tags"`
+
+	RouteName   string `json:"route_name"`
+	DedupKey    string `json:"dedup_key"`
+	ServiceHash string `json:"service_hash"`
+
+	GroupNameBefore string `json:"group_name_before"`
+	GroupNameAfter  string `json:"group_name_after"`
+	RuleNameBefore  string `json:"rule_name_before"`
+	RuleNameAfter   string `json:"rule_name_after"`
+	EntityBefore    string `json:"entity_before"`
+	EntityAfter     string `json:"entity_after"`
+}
+
+func (e *Engine) PreviewInputs(evs []n9e.CurEvent) []PreviewItem {
+	if len(evs) == 0 {
+		return nil
+	}
+	out := make([]PreviewItem, 0, len(evs))
+	for _, ev := range evs {
+		groupName := strings.TrimSpace(ev.GroupName)
+		ruleName := strings.TrimSpace(ev.RuleName)
+		sev := ev.Severity
+
+		rt := e.matchRoute(groupName, ruleName, sev)
+		if rt == nil {
+			continue
+		}
+
+		tags := tagsToMap(ev)
+		entityKey, entityDisp := pickEntity(ev, tags, rt.cfg.Dedup.NormalizePodName)
+
+		groupName2 := applyRewrites(rt.rewrites, "group_name", groupName)
+		ruleName2 := applyRewrites(rt.rewrites, "rule_name", ruleName)
+		entityKey2 := applyRewrites(rt.rewrites, "entity", entityKey)
+		entityDisp2 := applyRewrites(rt.rewrites, "entity", entityDisp)
+
+		dedupKey := buildDedupKey(rt.cfg.Dedup, ev, groupName2, ruleName2, sev, entityKey2)
+		serviceHash := hashKey(rt.name + "|" + dedupKey)
+
+		out = append(out, PreviewItem{
+			N9EHash:          strings.TrimSpace(ev.Hash),
+			N9EID:            ev.ID,
+			GroupID:          ev.GroupID,
+			RuleID:           ev.RuleID,
+			Severity:         sev,
+			Tags:             tags,
+			RouteName:        rt.name,
+			DedupKey:         dedupKey,
+			ServiceHash:      serviceHash,
+			GroupNameBefore:  groupName,
+			GroupNameAfter:   groupName2,
+			RuleNameBefore:   ruleName,
+			RuleNameAfter:    ruleName2,
+			EntityBefore:     entityDisp,
+			EntityAfter:      entityDisp2,
+		})
+	}
+	return out
+}
+
 func (e *Engine) RunOnce(ctx context.Context) (state.ApplyResult, error) {
 	e.pullMu.Lock()
 	defer e.pullMu.Unlock()
@@ -235,6 +306,7 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 				RuleName:         ruleName2,
 				Severity:         sev,
 				Entity:           entityDisp2,
+				Tags:             tags,
 				FirstTriggerTime: firstTs,
 				LastTriggerTime:  lastTs,
 				RawCount:         1,
