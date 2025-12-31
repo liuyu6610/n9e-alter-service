@@ -38,6 +38,7 @@ type RobotConfig struct {
 	Webhook string `json:"webhook"`
 	Secret  string `json:"secret"`
 	Keyword string `json:"keyword"`
+	FallbackRobotIDs []string `json:"fallback_robot_ids"`
 }
 
 type BindingRule struct {

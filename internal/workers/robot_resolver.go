@@ -19,17 +19,41 @@ type compiledBinding struct {
 
 type RobotResolver struct {
 	robots   map[string]dingtalk.Config
+	fallback map[string][]string
 	bindings []compiledBinding
 }
 
+type ResolvedRobot struct {
+	ID  string
+	Cfg dingtalk.Config
+}
+
 func NewRobotResolver(cfg config.Config) *RobotResolver {
-	r := &RobotResolver{robots: map[string]dingtalk.Config{}}
+	r := &RobotResolver{robots: map[string]dingtalk.Config{}, fallback: map[string][]string{}}
 	for _, rb := range cfg.Robots {
 		id := strings.TrimSpace(rb.ID)
 		if id == "" {
 			continue
 		}
 		r.robots[id] = dingtalk.Config{Webhook: strings.TrimSpace(rb.Webhook), Secret: strings.TrimSpace(rb.Secret), Keyword: strings.TrimSpace(rb.Keyword)}
+		if len(rb.FallbackRobotIDs) > 0 {
+			out := make([]string, 0, len(rb.FallbackRobotIDs))
+			seen := map[string]struct{}{}
+			for _, v := range rb.FallbackRobotIDs {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					continue
+				}
+				if _, ok := seen[v]; ok {
+					continue
+				}
+				out = append(out, v)
+				seen[v] = struct{}{}
+			}
+			if len(out) > 0 {
+				r.fallback[id] = out
+			}
+		}
 	}
 
 	compiled := make([]compiledBinding, 0, len(cfg.Bindings))
@@ -87,6 +111,56 @@ func (r *RobotResolver) ResolveForRecord(rec state.Record, routeName string, rou
 func (r *RobotResolver) ResolveIDsForRecord(rec state.Record, routeName string, routeRobotID string, global dingtalk.Config) ([]string, []config.BindingRule) {
 	_, ids, matched := r.resolve(rec, routeName, routeRobotID, global)
 	return ids, matched
+}
+
+func (r *RobotResolver) ResolveRobotsForRecord(rec state.Record, routeName string, routeRobotID string, global dingtalk.Config) ([]ResolvedRobot, []config.BindingRule) {
+	cfgs, ids, matched := r.resolve(rec, routeName, routeRobotID, global)
+	if len(cfgs) == 0 {
+		return nil, matched
+	}
+	out := make([]ResolvedRobot, 0, len(cfgs))
+	for i := range cfgs {
+		id := ""
+		if i < len(ids) {
+			id = ids[i]
+		}
+		out = append(out, ResolvedRobot{ID: id, Cfg: cfgs[i]})
+	}
+	return out, matched
+}
+
+func (r *RobotResolver) FallbackIDs(robotID string) []string {
+	robotID = strings.TrimSpace(robotID)
+	if robotID == "" {
+		return nil
+	}
+	ids := r.fallback[robotID]
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	for _, v := range ids {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (r *RobotResolver) ConfigByID(robotID string) (dingtalk.Config, bool) {
+	robotID = strings.TrimSpace(robotID)
+	if robotID == "" {
+		return dingtalk.Config{}, false
+	}
+	cfg, ok := r.robots[robotID]
+	if !ok {
+		return dingtalk.Config{}, false
+	}
+	if strings.TrimSpace(cfg.Webhook) == "" {
+		return dingtalk.Config{}, false
+	}
+	return cfg, true
 }
 
 func (r *RobotResolver) resolve(rec state.Record, routeName string, routeRobotID string, global dingtalk.Config) ([]dingtalk.Config, []string, []config.BindingRule) {

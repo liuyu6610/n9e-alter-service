@@ -23,6 +23,10 @@
           <el-icon><Operation /></el-icon>
           <span>路由</span>
         </el-menu-item>
+        <el-menu-item index="/rule-editor">
+          <el-icon><Operation /></el-icon>
+          <span>规则编辑</span>
+        </el-menu-item>
         <el-menu-item index="/preview">
           <el-icon><Operation /></el-icon>
           <span>预览</span>
@@ -61,6 +65,7 @@ const active = computed(() => route.path)
 const title = computed(() => {
   if (route.path === '/alerts') return '告警'
   if (route.path === '/routes') return '路由'
+  if (route.path === '/rule-editor') return '规则编辑'
   if (route.path === '/preview') return '预览'
   return '仪表盘'
 })

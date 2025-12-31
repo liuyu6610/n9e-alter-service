@@ -3,6 +3,7 @@ package workers
 import (
 	"context"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,18 +87,22 @@ func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc 
 
 	// 日报按记录选择机器人：同一日报路由内可能分流到不同群/机器人，避免“发错群”。
 	by := map[string]*struct {
-		cfgs  []dingtalk.Config
+		robots []ResolvedRobot
 		items []state.Record
 	}{}
 	for _, it := range items {
-		cfgs, _ := d.rr.ResolveForRecord(it, routeName, rc.Notify.RobotID, globalCfg)
+		robots, _ := d.rr.ResolveRobotsForRecord(it, routeName, rc.Notify.RobotID, globalCfg)
+		cfgs := make([]dingtalk.Config, 0, len(robots))
+		for i := range robots {
+			cfgs = append(cfgs, robots[i].Cfg)
+		}
 		key := robotsKey(cfgs)
 		b := by[key]
 		if b == nil {
 			b = &struct {
-				cfgs  []dingtalk.Config
+				robots []ResolvedRobot
 				items []state.Record
-			}{cfgs: cfgs, items: make([]state.Record, 0, 8)}
+			}{robots: robots, items: make([]state.Record, 0, 8)}
 			by[key] = b
 		}
 		b.items = append(b.items, it)
@@ -112,19 +117,38 @@ func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc 
 	sent := false
 	for _, k := range keys {
 		b := by[k]
-		if b == nil || len(b.cfgs) == 0 {
+		if b == nil || len(b.robots) == 0 {
 			continue
 		}
-		for _, dtCfg := range b.cfgs {
+		for _, rr := range b.robots {
+			dtCfg := rr.Cfg
 			if strings.TrimSpace(dtCfg.Webhook) == "" {
 				continue
 			}
 			title, text := report.BuildActiveMarkdown(rc.DailyReport.TitlePrefix, routeName, b.items, total, rc.DailyReport.MaxLines, rc.DailyReport.MaxChars)
+			sentOne := true
 			if err := d.dt.SendMarkdown(dtCfg, title, text); err != nil {
+				sentOne = false
 				log.Printf("daily report route=%s err=%v", routeName, err)
-				continue
+				fallbackIDs := d.rr.FallbackIDs(rr.ID)
+				if len(fallbackIDs) > 0 {
+					for _, fid := range fallbackIDs {
+						cfg2, ok := d.rr.ConfigByID(fid)
+						if !ok {
+							continue
+						}
+						if err2 := d.dt.SendMarkdown(cfg2, title, text); err2 != nil {
+							log.Printf("daily report fallback route=%s fid=%s err=%v", routeName, fid, err2)
+							continue
+						}
+						sentOne = true
+						break
+					}
+				}
 			}
-			sent = true
+			if sentOne {
+				sent = true
+			}
 		}
 	}
 	if !sent {

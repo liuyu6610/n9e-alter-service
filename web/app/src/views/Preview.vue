@@ -78,7 +78,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 
 import { previewRoutes } from '../api/client'
 
@@ -87,6 +87,19 @@ const loading = ref(false)
 const error = ref('')
 const items = ref([] as any[])
 const activeNames = ref([] as string[])
+
+const SAMPLE_KEY = 'n9e_alter_preview_sample'
+
+function loadSampleFromStorage() {
+  try {
+    const s = localStorage.getItem(SAMPLE_KEY)
+    if (!s) return
+    const obj = JSON.parse(s)
+    jsonText.value = JSON.stringify(obj, null, 2)
+  } catch {
+    // ignore
+  }
+}
 
 function loadSample() {
   jsonText.value = JSON.stringify(
@@ -135,4 +148,8 @@ async function doPreview() {
     loading.value = false
   }
 }
+
+onMounted(() => {
+  if (!jsonText.value) loadSampleFromStorage()
+})
 </script>

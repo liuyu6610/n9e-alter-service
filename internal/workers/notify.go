@@ -92,16 +92,20 @@ func (n *Notifier) sendByRobots(routeName string, routeRobotID string, globalCfg
 	}
 
 	type bucket struct {
-		cfgs  []dingtalk.Config
+		robots []ResolvedRobot
 		items []state.Record
 	}
 	by := map[string]*bucket{}
 	for _, it := range items {
-		cfgs, _ := n.rr.ResolveForRecord(it, routeName, routeRobotID, globalCfg)
+		robots, _ := n.rr.ResolveRobotsForRecord(it, routeName, routeRobotID, globalCfg)
+		cfgs := make([]dingtalk.Config, 0, len(robots))
+		for i := range robots {
+			cfgs = append(cfgs, robots[i].Cfg)
+		}
 		key := robotsKey(cfgs)
 		b := by[key]
 		if b == nil {
-			b = &bucket{cfgs: cfgs, items: make([]state.Record, 0, 8)}
+			b = &bucket{robots: robots, items: make([]state.Record, 0, 8)}
 			by[key] = b
 		}
 		b.items = append(b.items, it)
@@ -119,11 +123,12 @@ func (n *Notifier) sendByRobots(routeName string, routeRobotID string, globalCfg
 			continue
 		}
 		batch := b.items
-		cfgs := b.cfgs
-		if len(cfgs) == 0 {
+		robots := b.robots
+		if len(robots) == 0 {
 			continue
 		}
-		for _, dtCfg := range cfgs {
+		for _, rr := range robots {
+			dtCfg := rr.Cfg
 			if strings.TrimSpace(dtCfg.Webhook) == "" {
 				continue
 			}
@@ -133,8 +138,27 @@ func (n *Notifier) sendByRobots(routeName string, routeRobotID string, globalCfg
 			} else {
 				title, text = report.BuildRecoveredMarkdown("N9E 告警恢复", routeName, batch, maxLines, maxChars)
 			}
+			sent := true
 			if err := n.dt.SendMarkdown(dtCfg, title, text); err != nil {
+				sent = false
 				log.Printf("notify route=%s active=%v err=%v", routeName, active, err)
+				fallbackIDs := n.rr.FallbackIDs(rr.ID)
+				if len(fallbackIDs) > 0 {
+					for _, fid := range fallbackIDs {
+						cfg2, ok := n.rr.ConfigByID(fid)
+						if !ok {
+							continue
+						}
+						if err2 := n.dt.SendMarkdown(cfg2, title, text); err2 != nil {
+							log.Printf("notify fallback route=%s active=%v fid=%s err=%v", routeName, active, fid, err2)
+							continue
+						}
+						sent = true
+						break
+					}
+				}
+			}
+			if !sent {
 				continue
 			}
 			for _, it := range batch {
