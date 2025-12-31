@@ -173,7 +173,7 @@ func (e *Engine) PreviewInputs(evs []n9e.CurEvent) []PreviewItem {
 			continue
 		}
 
-		tags := tagsToMap(ev)
+		tags := applyTagRewrites(rt.rewrites, tagsToMap(ev))
 		entityKey, entityDisp := pickEntity(ev, tags, rt.cfg.Dedup.NormalizePodName)
 
 		groupName2 := applyRewrites(rt.rewrites, "group_name", groupName)
@@ -275,7 +275,7 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 			continue
 		}
 
-		tags := tagsToMap(ev)
+		tags := applyTagRewrites(rt.rewrites, tagsToMap(ev))
 		entityKey, entityDisp := pickEntity(ev, tags, rt.cfg.Dedup.NormalizePodName)
 
 		groupName2 := applyRewrites(rt.rewrites, "group_name", groupName)
@@ -365,6 +365,32 @@ func applyRewrites(rws []compiledRewrite, field string, s string) string {
 		}
 	}
 	return s
+}
+
+// tag 重写：Dedup.Rewrites 的 field 支持 "tag:<key>"，用于对指定 tag 值做正则替换/提取（会影响后续 entity/dedup/绑定匹配）。
+func applyTagRewrites(rws []compiledRewrite, tags map[string]string) map[string]string {
+	if len(rws) == 0 || len(tags) == 0 {
+		return tags
+	}
+	for _, rw := range rws {
+		f := strings.TrimSpace(rw.field)
+		if f == "" {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(f), "tag:") {
+			continue
+		}
+		key := strings.TrimSpace(f[len("tag:"):])
+		if key == "" {
+			continue
+		}
+		v, ok := tags[key]
+		if !ok {
+			continue
+		}
+		tags[key] = rw.re.ReplaceAllString(v, rw.replace)
+	}
+	return tags
 }
 
 func buildDedupKey(dc config.DedupConfig, ev n9e.CurEvent, groupName string, ruleName string, severity int, entityKey string) string {

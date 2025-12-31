@@ -444,6 +444,23 @@ func (s *Store) Summary() (active int, recovered int, total int) {
 	return
 }
 
+// ForEachRecord 在只读锁下遍历所有记录；回调返回 false 可提前终止遍历。
+func (s *Store) ForEachRecord(fn func(Record) bool) {
+	if fn == nil {
+		return
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.records {
+		if r == nil {
+			continue
+		}
+		if !fn(*r) {
+			return
+		}
+	}
+}
+
 func (s *Store) Get(serviceHash string) (Record, bool) {
 	serviceHash = stringsTrim(serviceHash)
 	if serviceHash == "" {

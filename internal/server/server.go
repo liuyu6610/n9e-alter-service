@@ -19,6 +19,7 @@ import (
 	"n9e-alter-service/internal/ingest"
 	"n9e-alter-service/internal/n9e"
 	"n9e-alter-service/internal/state"
+	"n9e-alter-service/internal/telemetry"
 	"n9e-alter-service/internal/workers"
 )
 
@@ -27,6 +28,7 @@ type Server struct {
 	eng *engine.Engine
 	st  *state.Store
 	ing *ingest.Manager
+	stt *telemetry.Stats
 }
 
 func (s *Server) handleRoutesPreview(w http.ResponseWriter, r *http.Request) {
@@ -162,8 +164,8 @@ func workersMergeDingTalk(global config.DingTalkConfig, override config.DingTalk
 	return dingtalk.Config{Webhook: w, Secret: s, Keyword: k}
 }
 
-func New(cfg config.Config, eng *engine.Engine, st *state.Store, ing *ingest.Manager) *Server {
-	return &Server{cfg: cfg, eng: eng, st: st, ing: ing}
+func New(cfg config.Config, eng *engine.Engine, st *state.Store, ing *ingest.Manager, stats *telemetry.Stats) *Server {
+	return &Server{cfg: cfg, eng: eng, st: st, ing: ing, stt: stats}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -171,6 +173,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
+	mux.HandleFunc("/api/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/api/v1/pull/run", s.handlePullRun)
 	mux.HandleFunc("/api/v1/events/ingest", s.handleIngest)
 	mux.HandleFunc("/api/v1/routes/preview", s.handleRoutesPreview)
@@ -186,6 +189,31 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"time":   time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	active, recovered, total := 0, 0, 0
+	if s.st != nil {
+		active, recovered, total = s.st.Summary()
+	}
+
+	snap := telemetry.Snapshot{}
+	if s.stt != nil {
+		snap = s.stt.Snapshot()
+	} else {
+		now := time.Now().Unix()
+		snap = telemetry.Snapshot{Time: now, StartedAtUnix: now, UptimeSeconds: 0}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"time": time.Now().UTC().Format(time.RFC3339),
+		"stats": snap,
+		"state": map[string]any{"active": active, "recovered": recovered, "total": total},
 	})
 }
 

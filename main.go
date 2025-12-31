@@ -7,14 +7,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"n9e-alter-service/internal/config"
 	"n9e-alter-service/internal/engine"
 	"n9e-alter-service/internal/ingest"
 	"n9e-alter-service/internal/server"
 	"n9e-alter-service/internal/state"
+	"n9e-alter-service/internal/telemetry"
 	"n9e-alter-service/internal/workers"
 )
 
@@ -51,12 +55,20 @@ func main() {
 		log.Printf("load snapshot: %v", err)
 	}
 
+	stats := telemetry.New()
+
 	eng, err := engine.New(cfg, st)
 	if err != nil {
 		log.Fatalf("init engine: %v", err)
 	}
 
-	ing := ingest.New(cfg.Push, eng, st)
+
+	// Redis 仅用于高并发 dedup/聚合热状态（不用于持久化存储）。
+	var rdb *redis.Client
+	if cfg.State.Redis.Enabled && strings.TrimSpace(cfg.State.Redis.Addr) != "" {
+		rdb = redis.NewClient(&redis.Options{Addr: strings.TrimSpace(cfg.State.Redis.Addr), Password: cfg.State.Redis.Password, DB: cfg.State.Redis.DB})
+	}
+	ing := ingest.New(cfg.Push, cfg.State, eng, st, rdb, stats)
 
 	rootCtx, cancelRoot := context.WithCancel(context.Background())
 	defer cancelRoot()
@@ -66,13 +78,13 @@ func main() {
 	startPullLoop(rootCtx, cfg, eng)
 	startSnapshotLoop(rootCtx, cfg, st)
 
-	notify := workers.NewNotifier(cfg, st)
+	notify := workers.NewNotifier(cfg, st, rdb, stats)
 	notify.Start(rootCtx)
 
 	daily := workers.NewDailyReporter(cfg, st)
 	daily.Start(rootCtx)
 
-	s := server.New(cfg, eng, st, ing)
+	s := server.New(cfg, eng, st, ing, stats)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -110,6 +122,9 @@ func main() {
 	}
 	if err := st.SaveToFile(cfg.State.SnapshotFile); err != nil {
 		log.Printf("save snapshot: %v", err)
+	}
+	if rdb != nil {
+		_ = rdb.Close()
 	}
 
 	listenErr := <-errCh

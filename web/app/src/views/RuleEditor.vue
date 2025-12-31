@@ -16,7 +16,15 @@
 
         <el-scrollbar height="520">
           <el-menu :default-active="activeName" @select="onSelect">
-            <el-menu-item v-for="r in filteredRoutes" :key="r.name" :index="r.name">
+            <el-menu-item
+              v-for="r in filteredRoutes"
+              :key="r.name"
+              :index="r.name"
+              draggable="true"
+              @dragstart="onDragStart(r.name)"
+              @dragover.prevent
+              @drop="onDrop(r.name)"
+            >
               <div style="display: flex; justify-content: space-between; width: 100%; align-items: center">
                 <span style="max-width: 120px; overflow: hidden; text-overflow: ellipsis">{{ r.name }}</span>
                 <el-tag size="small" :type="r.enabled ? 'success' : 'info'">{{ r.enabled ? 'on' : 'off' }}</el-tag>
@@ -462,6 +470,8 @@ const activeName = ref('')
 const activeTab = ref('match')
 const filterText = ref('')
 
+const draggingRouteName = ref('')
+
 const exportObj = ref({ routes: [], robots: [], bindings: [] } as any)
 const robotsJson = ref('[]')
 const bindingsJson = ref('[]')
@@ -717,6 +727,25 @@ const severityIn = computed({
 
 function onSelect(name: string) {
   activeName.value = name
+}
+
+function onDragStart(name: string) {
+  draggingRouteName.value = String(name || '')
+}
+
+function onDrop(targetName: string) {
+  const srcName = String(draggingRouteName.value || '')
+  const dstName = String(targetName || '')
+  draggingRouteName.value = ''
+  if (!srcName || !dstName || srcName === dstName) return
+
+  const from = routes.value.findIndex((r: RouteItem) => r.name === srcName)
+  const to = routes.value.findIndex((r: RouteItem) => r.name === dstName)
+  if (from < 0 || to < 0) return
+
+  const moved = routes.value.splice(from, 1)[0]
+  routes.value.splice(to, 0, moved)
+  exportObj.value.routes = JSON.parse(JSON.stringify(routes.value))
 }
 
 async function refresh() {

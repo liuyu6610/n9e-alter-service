@@ -93,6 +93,17 @@ type StateConfig struct {
 	SnapshotIntervalSeconds int    `json:"snapshot_interval_seconds"`
 	RetainRecoveredSeconds  int    `json:"retain_recovered_seconds"`
 	RecoverMissCount        int    `json:"recover_miss_count"`
+	Redis                   RedisConfig `json:"redis"`
+}
+
+type RedisConfig struct {
+	Enabled    bool   `json:"enabled"`
+	Addr       string `json:"addr"`
+	Password   string `json:"password"`
+	DB         int    `json:"db"`
+	KeyPrefix  string `json:"key_prefix"`
+	HotTTLSeconds int `json:"hot_ttl_seconds"`
+	TTLSeconds    int `json:"ttl_seconds"`
 }
 
 type RouteConfig struct {
@@ -186,7 +197,16 @@ func Default() Config {
 			SnapshotFile:            "",
 			SnapshotIntervalSeconds: 30,
 			RetainRecoveredSeconds:  86400,
-			RecoverMissCount:        1,
+			RecoverMissCount:        2,
+			Redis: RedisConfig{
+				Enabled:    false,
+				Addr:       "",
+				Password:   "",
+				DB:         0,
+				KeyPrefix:  "n9e_alter",
+				HotTTLSeconds: 86400,
+				TTLSeconds:    0,
+			},
 		},
 		DingTalk: DingTalkConfig{Webhook: "", Secret: "", Keyword: ""},
 		Routes: []RouteConfig{
@@ -312,6 +332,41 @@ func Load(path string) (Config, error) {
 	}
 	if v := strings.TrimSpace(os.Getenv("STATE_SNAPSHOT_FILE")); v != "" {
 		cfg.State.SnapshotFile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_ENABLED")); v != "" {
+		cfg.State.Redis.Enabled = !(v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no"))
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_ADDR")); v != "" {
+		cfg.State.Redis.Addr = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_PASSWORD")); v != "" {
+		cfg.State.Redis.Password = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_DB")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.State.Redis.DB = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_KEY_PREFIX")); v != "" {
+		cfg.State.Redis.KeyPrefix = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_HOT_TTL_SECONDS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.State.Redis.HotTTLSeconds = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("STATE_REDIS_TTL_SECONDS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.State.Redis.TTLSeconds = n
+		}
+	}
+
+	if cfg.State.Redis.HotTTLSeconds <= 0 {
+		if cfg.State.Redis.TTLSeconds > 0 {
+			cfg.State.Redis.HotTTLSeconds = cfg.State.Redis.TTLSeconds
+		} else {
+			cfg.State.Redis.HotTTLSeconds = 86400
+		}
 	}
 
 	if v := strings.TrimSpace(os.Getenv("DINGTALK_WEBHOOK")); v != "" {

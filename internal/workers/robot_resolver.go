@@ -262,7 +262,11 @@ func bindingMatch(cb compiledBinding, rec state.Record, routeName string) bool {
 		if rec.Tags == nil {
 			return false
 		}
-		if strings.TrimSpace(rec.Tags[k]) != v {
+		vv, ok := rec.Tags[k]
+		if !ok {
+			return false
+		}
+		if strings.TrimSpace(vv) != v {
 			return false
 		}
 	}
@@ -274,7 +278,11 @@ func bindingMatch(cb compiledBinding, rec state.Record, routeName string) bool {
 		if rec.Tags == nil {
 			return false
 		}
-		if !re.MatchString(strings.TrimSpace(rec.Tags[k])) {
+		vv, ok := rec.Tags[k]
+		if !ok {
+			return false
+		}
+		if !re.MatchString(strings.TrimSpace(vv)) {
 			return false
 		}
 	}
