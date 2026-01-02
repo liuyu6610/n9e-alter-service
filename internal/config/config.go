@@ -14,15 +14,27 @@ type Config struct {
 	WebDir  string `json:"web_dir"`
 	DataDir string `json:"data_dir"`
 
+	APIToken string `json:"api_token"`
+
 	N9E   N9EConfig   `json:"n9e"`
 	Pull  PullConfig  `json:"pull"`
 	Push  PushConfig  `json:"push"`
 	State StateConfig `json:"state"`
 
 	DingTalk DingTalkConfig `json:"dingtalk"`
+	Silences []SilenceRule  `json:"silences"`
 	Routes   []RouteConfig  `json:"routes"`
 	Robots   []RobotConfig  `json:"robots"`
 	Bindings []BindingRule  `json:"bindings"`
+}
+
+type SilenceRule struct {
+	Name          string            `json:"name"`
+	Enabled       bool              `json:"enabled"`
+	RouteName     string            `json:"route_name"`
+	Tags          map[string]string `json:"tags"`
+	TagRegex      map[string]string `json:"tag_regex"`
+	ExpiresAtUnix int64             `json:"expires_at_unix"`
 }
 
 type PushConfig struct {
@@ -34,10 +46,10 @@ type PushConfig struct {
 }
 
 type RobotConfig struct {
-	ID      string `json:"id"`
-	Webhook string `json:"webhook"`
-	Secret  string `json:"secret"`
-	Keyword string `json:"keyword"`
+	ID               string   `json:"id"`
+	Webhook          string   `json:"webhook"`
+	Secret           string   `json:"secret"`
+	Keyword          string   `json:"keyword"`
 	FallbackRobotIDs []string `json:"fallback_robot_ids"`
 }
 
@@ -89,21 +101,21 @@ type PullConfig struct {
 }
 
 type StateConfig struct {
-	SnapshotFile            string `json:"snapshot_file"`
-	SnapshotIntervalSeconds int    `json:"snapshot_interval_seconds"`
-	RetainRecoveredSeconds  int    `json:"retain_recovered_seconds"`
-	RecoverMissCount        int    `json:"recover_miss_count"`
+	SnapshotFile            string      `json:"snapshot_file"`
+	SnapshotIntervalSeconds int         `json:"snapshot_interval_seconds"`
+	RetainRecoveredSeconds  int         `json:"retain_recovered_seconds"`
+	RecoverMissCount        int         `json:"recover_miss_count"`
 	Redis                   RedisConfig `json:"redis"`
 }
 
 type RedisConfig struct {
-	Enabled    bool   `json:"enabled"`
-	Addr       string `json:"addr"`
-	Password   string `json:"password"`
-	DB         int    `json:"db"`
-	KeyPrefix  string `json:"key_prefix"`
-	HotTTLSeconds int `json:"hot_ttl_seconds"`
-	TTLSeconds    int `json:"ttl_seconds"`
+	Enabled       bool   `json:"enabled"`
+	Addr          string `json:"addr"`
+	Password      string `json:"password"`
+	DB            int    `json:"db"`
+	KeyPrefix     string `json:"key_prefix"`
+	HotTTLSeconds int    `json:"hot_ttl_seconds"`
+	TTLSeconds    int    `json:"ttl_seconds"`
 }
 
 type RouteConfig struct {
@@ -111,8 +123,41 @@ type RouteConfig struct {
 	Enabled     bool              `json:"enabled"`
 	Match       RouteMatchConfig  `json:"match"`
 	Dedup       DedupConfig       `json:"dedup"`
+	Processors  []ProcessorConfig `json:"processors"`
 	Notify      NotifyConfig      `json:"notify"`
 	DailyReport DailyReportConfig `json:"daily_report"`
+}
+
+type ProcessorConfig struct {
+	Type    string `json:"type"`
+	Enabled bool   `json:"enabled"`
+
+	Drop    *DropProcessorConfig    `json:"drop"`
+	Relabel *RelabelProcessorConfig `json:"relabel"`
+	Update  *UpdateProcessorConfig  `json:"update"`
+}
+
+type DropProcessorConfig struct {
+	When string `json:"when"`
+}
+
+type RelabelProcessorConfig struct {
+	Rules []RelabelRule `json:"rules"`
+}
+
+type RelabelRule struct {
+	Target  string `json:"target"`
+	Pattern string `json:"pattern"`
+	Replace string `json:"replace"`
+}
+
+type UpdateProcessorConfig struct {
+	Sets []UpdateSet `json:"sets"`
+}
+
+type UpdateSet struct {
+	Field string `json:"field"`
+	Value string `json:"value"`
 }
 
 type RouteMatchConfig struct {
@@ -140,12 +185,28 @@ type RewriteRule struct {
 }
 
 type NotifyConfig struct {
-	Enabled               bool           `json:"enabled"`
-	DingTalk              DingTalkConfig `json:"dingtalk"`
-	RobotID               string         `json:"robot_id"`
-	ObserveSeconds        int            `json:"observe_seconds"`
-	RepeatIntervalSeconds int            `json:"repeat_interval_seconds"`
-	SendRecovered         bool           `json:"send_recovered"`
+	Enabled               bool               `json:"enabled"`
+	DingTalk              DingTalkConfig     `json:"dingtalk"`
+	Webhook               WebhookConfig      `json:"webhook"`
+	RobotID               string             `json:"robot_id"`
+	ObserveSeconds        int                `json:"observe_seconds"`
+	RepeatIntervalSeconds int                `json:"repeat_interval_seconds"`
+	SendRecovered         bool               `json:"send_recovered"`
+	Escalations           []EscalationConfig `json:"escalations"`
+}
+
+type EscalationConfig struct {
+	AfterSeconds          int           `json:"after_seconds"`
+	RepeatIntervalSeconds int           `json:"repeat_interval_seconds"`
+	RobotIDs              []string      `json:"robot_ids"`
+	Webhook               WebhookConfig `json:"webhook"`
+}
+
+type WebhookConfig struct {
+	Enabled        bool              `json:"enabled"`
+	URL            string            `json:"url"`
+	TimeoutSeconds int               `json:"timeout_seconds"`
+	Headers        map[string]string `json:"headers"`
 }
 
 type DailyReportConfig struct {
@@ -199,16 +260,17 @@ func Default() Config {
 			RetainRecoveredSeconds:  86400,
 			RecoverMissCount:        2,
 			Redis: RedisConfig{
-				Enabled:    false,
-				Addr:       "",
-				Password:   "",
-				DB:         0,
-				KeyPrefix:  "n9e_alter",
+				Enabled:       false,
+				Addr:          "",
+				Password:      "",
+				DB:            0,
+				KeyPrefix:     "n9e_alter",
 				HotTTLSeconds: 86400,
 				TTLSeconds:    0,
 			},
 		},
 		DingTalk: DingTalkConfig{Webhook: "", Secret: "", Keyword: ""},
+		Silences: nil,
 		Routes: []RouteConfig{
 			{
 				Name:    "default",
@@ -232,10 +294,12 @@ func Default() Config {
 				Notify: NotifyConfig{
 					Enabled:               false,
 					DingTalk:              DingTalkConfig{},
+					Webhook:               WebhookConfig{Enabled: false, URL: "", TimeoutSeconds: 5, Headers: nil},
 					RobotID:               "",
 					ObserveSeconds:        0,
 					RepeatIntervalSeconds: 3600,
 					SendRecovered:         true,
+					Escalations:           nil,
 				},
 				DailyReport: DailyReportConfig{
 					Enabled:     false,
@@ -249,6 +313,7 @@ func Default() Config {
 		},
 		Robots:   nil,
 		Bindings: nil,
+		APIToken: "",
 	}
 }
 
@@ -314,6 +379,9 @@ func Load(path string) (Config, error) {
 	}
 	if v := strings.TrimSpace(os.Getenv("PUSH_TOKEN")); v != "" {
 		cfg.Push.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv("API_TOKEN")); v != "" {
+		cfg.APIToken = v
 	}
 	if v := strings.TrimSpace(os.Getenv("PUSH_QUEUE_SIZE")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -394,9 +462,6 @@ func Load(path string) (Config, error) {
 
 	if strings.TrimSpace(cfg.Addr) == "" {
 		return cfg, fmt.Errorf("addr is empty")
-	}
-	if strings.TrimSpace(cfg.N9E.BaseURL) == "" {
-		return cfg, fmt.Errorf("n9e.base_url is empty")
 	}
 
 	return cfg, nil

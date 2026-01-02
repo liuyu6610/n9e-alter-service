@@ -10,15 +10,31 @@ import (
 	"n9e-alter-service/internal/config"
 	"n9e-alter-service/internal/dingtalk"
 	"n9e-alter-service/internal/report"
+	"n9e-alter-service/internal/runtime"
 	"n9e-alter-service/internal/scheduler"
 	"n9e-alter-service/internal/state"
 )
 
+func findRouteConfig(cfg config.Config, routeName string) (config.RouteConfig, bool) {
+	routeName = strings.TrimSpace(routeName)
+	if routeName == "" {
+		return config.RouteConfig{}, false
+	}
+	for i := range cfg.Routes {
+		rc := cfg.Routes[i]
+		name := normalizeRouteName(rc.Name, i)
+		if strings.EqualFold(name, routeName) {
+			return rc, true
+		}
+	}
+	return config.RouteConfig{}, false
+}
+
 type DailyReporter struct {
 	cfg config.Config
+	rt  *runtime.Runtime
 	st  *state.Store
 	dt  *dingtalk.Client
-	rr  *RobotResolver
 }
 
 func NewDailyReporter(cfg config.Config, st *state.Store) *DailyReporter {
@@ -26,34 +42,104 @@ func NewDailyReporter(cfg config.Config, st *state.Store) *DailyReporter {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &DailyReporter{cfg: cfg, st: st, dt: dingtalk.New(timeout), rr: NewRobotResolver(cfg)}
+	return &DailyReporter{cfg: cfg, st: st, dt: dingtalk.New(timeout)}
+}
+
+func NewDailyReporterWithRuntime(rt *runtime.Runtime, st *state.Store) *DailyReporter {
+	snap := rt.Get()
+	cfg := snap.Cfg
+	timeout := time.Duration(cfg.N9E.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	return &DailyReporter{cfg: cfg, rt: rt, st: st, dt: dingtalk.New(timeout)}
 }
 
 func (d *DailyReporter) Start(ctx context.Context) {
-	for i := range d.cfg.Routes {
-		rc := d.cfg.Routes[i]
-		if !rc.Enabled {
-			continue
-		}
-		if !rc.DailyReport.Enabled {
-			continue
+	go d.reconcileLoop(ctx)
+}
+
+type dailyJob struct {
+	cancel context.CancelFunc
+	cron   string
+}
+
+func (d *DailyReporter) reconcileLoop(ctx context.Context) {
+	jobs := map[string]dailyJob{}
+
+	reconcile := func() {
+		cfg := d.cfg
+		if d.rt != nil {
+			cfg = d.rt.Get().Cfg
 		}
 
-		routeName := normalizeRouteName(rc.Name, i)
-		globalCfg := mergeDingTalk(d.cfg.DingTalk, rc.Notify.DingTalk)
-
-		sched, err := scheduler.Parse(rc.DailyReport.Cron)
-		if err != nil {
-			log.Printf("daily report route=%s cron invalid: %v", routeName, err)
-			continue
+		desired := map[string]string{}
+		for i := range cfg.Routes {
+			rc := cfg.Routes[i]
+			if !rc.Enabled {
+				continue
+			}
+			if !rc.DailyReport.Enabled {
+				continue
+			}
+			routeName := normalizeRouteName(rc.Name, i)
+			cron := strings.TrimSpace(rc.DailyReport.Cron)
+			if cron == "" {
+				cron = "0 18 * * *"
+			}
+			desired[routeName] = cron
 		}
 
-		rc2 := rc
-		go d.runRoute(ctx, routeName, globalCfg, sched, rc2)
+		// stop removed
+		for rn := range jobs {
+			if _, ok := desired[rn]; !ok {
+				j := jobs[rn]
+				j.cancel()
+				delete(jobs, rn)
+			}
+		}
+
+		// start/update
+		for rn, cron := range desired {
+			j, ok := jobs[rn]
+			if ok && strings.TrimSpace(j.cron) == strings.TrimSpace(cron) {
+				continue
+			}
+			if ok {
+				j.cancel()
+				delete(jobs, rn)
+			}
+
+			sched, err := scheduler.Parse(cron)
+			if err != nil {
+				log.Printf("daily report route=%s cron invalid: %v", rn, err)
+				continue
+			}
+			jobCtx, cancel := context.WithCancel(ctx)
+			jobs[rn] = dailyJob{cancel: cancel, cron: cron}
+			go d.runRoute(jobCtx, rn, sched)
+		}
+	}
+
+	// initial
+	reconcile()
+
+	t := time.NewTicker(1 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			for _, j := range jobs {
+				j.cancel()
+			}
+			return
+		case <-t.C:
+			reconcile()
+		}
 	}
 }
 
-func (d *DailyReporter) runRoute(ctx context.Context, routeName string, globalCfg dingtalk.Config, sched scheduler.Schedule, rc config.RouteConfig) {
+func (d *DailyReporter) runRoute(ctx context.Context, routeName string, sched scheduler.Schedule) {
 	for {
 		next := sched.Next(time.Now())
 		if next.IsZero() {
@@ -75,11 +161,26 @@ func (d *DailyReporter) runRoute(ctx context.Context, routeName string, globalCf
 		case <-timer.C:
 		}
 
-		d.runOnce(routeName, globalCfg, rc)
+		d.runOnce(routeName, dingtalk.Config{}, config.RouteConfig{})
 	}
 }
 
 func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc config.RouteConfig) {
+	cfg := d.cfg
+	if d.rt != nil {
+		cfg = d.rt.Get().Cfg
+	}
+	rc2, ok := findRouteConfig(cfg, routeName)
+	if !ok {
+		return
+	}
+	if !rc2.Enabled || !rc2.DailyReport.Enabled {
+		return
+	}
+	rc = rc2
+	globalCfg = mergeDingTalk(cfg.DingTalk, rc.Notify.DingTalk)
+	resolver := NewRobotResolver(cfg)
+
 	items, total := d.st.List(state.StatusActive, routeName, 0, 100000)
 	if len(items) == 0 {
 		return
@@ -88,10 +189,10 @@ func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc 
 	// 日报按记录选择机器人：同一日报路由内可能分流到不同群/机器人，避免“发错群”。
 	by := map[string]*struct {
 		robots []ResolvedRobot
-		items []state.Record
+		items  []state.Record
 	}{}
 	for _, it := range items {
-		robots, _ := d.rr.ResolveRobotsForRecord(it, routeName, rc.Notify.RobotID, globalCfg)
+		robots, _ := resolver.ResolveRobotsForRecord(it, routeName, rc.Notify.RobotID, globalCfg)
 		cfgs := make([]dingtalk.Config, 0, len(robots))
 		for i := range robots {
 			cfgs = append(cfgs, robots[i].Cfg)
@@ -101,7 +202,7 @@ func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc 
 		if b == nil {
 			b = &struct {
 				robots []ResolvedRobot
-				items []state.Record
+				items  []state.Record
 			}{robots: robots, items: make([]state.Record, 0, 8)}
 			by[key] = b
 		}
@@ -120,8 +221,8 @@ func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc 
 		if b == nil || len(b.robots) == 0 {
 			continue
 		}
-		for _, rr := range b.robots {
-			dtCfg := rr.Cfg
+		for _, rb := range b.robots {
+			dtCfg := rb.Cfg
 			if strings.TrimSpace(dtCfg.Webhook) == "" {
 				continue
 			}
@@ -130,10 +231,10 @@ func (d *DailyReporter) runOnce(routeName string, globalCfg dingtalk.Config, rc 
 			if err := d.dt.SendMarkdown(dtCfg, title, text); err != nil {
 				sentOne = false
 				log.Printf("daily report route=%s err=%v", routeName, err)
-				fallbackIDs := d.rr.FallbackIDs(rr.ID)
+				fallbackIDs := resolver.FallbackIDs(rb.ID)
 				if len(fallbackIDs) > 0 {
 					for _, fid := range fallbackIDs {
-						cfg2, ok := d.rr.ConfigByID(fid)
+						cfg2, ok := resolver.ConfigByID(fid)
 						if !ok {
 							continue
 						}

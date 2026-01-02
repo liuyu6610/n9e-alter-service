@@ -23,6 +23,10 @@
           <el-icon><Operation /></el-icon>
           <span>路由</span>
         </el-menu-item>
+        <el-menu-item index="/settings">
+          <el-icon><Setting /></el-icon>
+          <span>设置</span>
+        </el-menu-item>
         <el-menu-item index="/rule-editor">
           <el-icon><Operation /></el-icon>
           <span>规则编辑</span>
@@ -54,7 +58,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive } from 'vue'
 import { useRoute } from 'vue-router'
-import { Bell, DataBoard, Operation } from '@element-plus/icons-vue'
+import { Bell, DataBoard, Operation, Setting } from '@element-plus/icons-vue'
 
 import { getHealth, getReady } from './api/client'
 
@@ -65,6 +69,7 @@ const active = computed(() => route.path)
 const title = computed(() => {
   if (route.path === '/alerts') return '告警'
   if (route.path === '/routes') return '路由'
+  if (route.path === '/settings') return '设置'
   if (route.path === '/rule-editor') return '规则编辑'
   if (route.path === '/preview') return '预览'
   return '仪表盘'

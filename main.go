@@ -11,11 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"n9e-alter-service/internal/config"
 	"n9e-alter-service/internal/engine"
 	"n9e-alter-service/internal/ingest"
+	"n9e-alter-service/internal/redismgr"
+	"n9e-alter-service/internal/rulesrepo"
+	"n9e-alter-service/internal/runtime"
 	"n9e-alter-service/internal/server"
 	"n9e-alter-service/internal/state"
 	"n9e-alter-service/internal/telemetry"
@@ -62,29 +63,40 @@ func main() {
 		log.Fatalf("init engine: %v", err)
 	}
 
+	repo := rulesrepo.New(cfg.DataDir)
+	if rs, _, ok, err := repo.LoadCurrent(); err != nil {
+		log.Printf("load current rules: %v", err)
+	} else if ok {
+		cfg = rulesrepo.ApplyToConfig(cfg, rs)
+		eng2, err := engine.New(cfg, st)
+		if err != nil {
+			log.Printf("init engine from current rules: %v", err)
+		} else {
+			eng = eng2
+		}
+	}
+
+	rt := runtime.New(runtime.Snapshot{Cfg: cfg, Eng: eng})
 
 	// Redis 仅用于高并发 dedup/聚合热状态（不用于持久化存储）。
-	var rdb *redis.Client
-	if cfg.State.Redis.Enabled && strings.TrimSpace(cfg.State.Redis.Addr) != "" {
-		rdb = redis.NewClient(&redis.Options{Addr: strings.TrimSpace(cfg.State.Redis.Addr), Password: cfg.State.Redis.Password, DB: cfg.State.Redis.DB})
-	}
-	ing := ingest.New(cfg.Push, cfg.State, eng, st, rdb, stats)
+	rm := redismgr.New(cfg.State.Redis)
+	ing := ingest.New(cfg.Push, cfg.State, eng, st, rm, stats)
 
 	rootCtx, cancelRoot := context.WithCancel(context.Background())
 	defer cancelRoot()
 
 	ing.Start(rootCtx)
 
-	startPullLoop(rootCtx, cfg, eng)
+	startPullLoopRuntime(rootCtx, cfg, rt)
 	startSnapshotLoop(rootCtx, cfg, st)
 
-	notify := workers.NewNotifier(cfg, st, rdb, stats)
+	notify := workers.NewNotifierWithRuntime(rt, st, rm, stats)
 	notify.Start(rootCtx)
 
-	daily := workers.NewDailyReporter(cfg, st)
+	daily := workers.NewDailyReporterWithRuntime(rt, st)
 	daily.Start(rootCtx)
 
-	s := server.New(cfg, eng, st, ing, stats)
+	s := server.NewWithRuntime(rt, repo, st, ing, rm, stats)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -123,8 +135,8 @@ func main() {
 	if err := st.SaveToFile(cfg.State.SnapshotFile); err != nil {
 		log.Printf("save snapshot: %v", err)
 	}
-	if rdb != nil {
-		_ = rdb.Close()
+	if rm != nil {
+		rm.Close()
 	}
 
 	listenErr := <-errCh
@@ -149,6 +161,39 @@ func startPullLoop(ctx context.Context, cfg config.Config, eng *engine.Engine) {
 			case <-t.C:
 				pullCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 				_, err := eng.RunOnce(pullCtx)
+				cancel()
+				if err != nil {
+					log.Printf("pull error: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+func startPullLoopRuntime(ctx context.Context, cfg config.Config, rt *runtime.Runtime) {
+	interval := time.Duration(cfg.Pull.IntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				snap := rt.Get()
+				if snap.Eng == nil {
+					continue
+				}
+				if strings.TrimSpace(snap.Cfg.N9E.BaseURL) == "" {
+					log.Printf("pull skipped: n9e.base_url is empty")
+					continue
+				}
+				pullCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				_, err := snap.Eng.RunOnce(pullCtx)
 				cancel()
 				if err != nil {
 					log.Printf("pull error: %v", err)

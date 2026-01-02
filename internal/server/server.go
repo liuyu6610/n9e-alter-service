@@ -18,17 +18,40 @@ import (
 	"n9e-alter-service/internal/engine"
 	"n9e-alter-service/internal/ingest"
 	"n9e-alter-service/internal/n9e"
+	"n9e-alter-service/internal/redismgr"
+	"n9e-alter-service/internal/rulesrepo"
+	"n9e-alter-service/internal/runtime"
 	"n9e-alter-service/internal/state"
 	"n9e-alter-service/internal/telemetry"
 	"n9e-alter-service/internal/workers"
 )
 
 type Server struct {
-	cfg config.Config
-	eng *engine.Engine
-	st  *state.Store
-	ing *ingest.Manager
-	stt *telemetry.Stats
+	rt   *runtime.Runtime
+	repo *rulesrepo.Repo
+	st   *state.Store
+	ing  *ingest.Manager
+	rm   *redismgr.Manager
+	stt  *telemetry.Stats
+}
+
+type publishRequest struct {
+	RuleSet rulesrepo.RuleSet `json:"rules"`
+	Message string            `json:"message"`
+	Actor   string            `json:"actor"`
+}
+
+type rollbackRequest struct {
+	Version string `json:"version"`
+	Message string `json:"message"`
+	Actor   string `json:"actor"`
+}
+
+type rulesVersionGetResponse struct {
+	Time    string            `json:"time"`
+	Version string            `json:"version"`
+	Hash    string            `json:"hash"`
+	Rules   rulesrepo.RuleSet `json:"rules"`
 }
 
 func (s *Server) handleRoutesPreview(w http.ResponseWriter, r *http.Request) {
@@ -73,16 +96,17 @@ func (s *Server) handleRoutesPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rr := workers.NewRobotResolver(s.cfg)
-	items := s.eng.PreviewInputs(batch)
+	snap := s.rt.Get()
+	rr := workers.NewRobotResolver(snap.Cfg)
+	items := snap.Eng.PreviewInputs(batch)
 	out := make([]map[string]any, 0, len(items))
 	for _, it := range items {
-		rc, ok := findRouteConfig(s.cfg, it.RouteName)
+		rc, ok := findRouteConfig(snap.Cfg, it.RouteName)
 		routeRobotID := ""
-		dtCfg := workersMergeDingTalk(s.cfg.DingTalk, config.DingTalkConfig{})
+		dtCfg := workersMergeDingTalk(snap.Cfg.DingTalk, config.DingTalkConfig{})
 		if ok {
 			routeRobotID = rc.Notify.RobotID
-			dtCfg = workersMergeDingTalk(s.cfg.DingTalk, rc.Notify.DingTalk)
+			dtCfg = workersMergeDingTalk(snap.Cfg.DingTalk, rc.Notify.DingTalk)
 		}
 
 		rec := state.Record{
@@ -103,23 +127,23 @@ func (s *Server) handleRoutesPreview(w http.ResponseWriter, r *http.Request) {
 		}
 
 		out = append(out, map[string]any{
-			"n9e_hash":           it.N9EHash,
-			"n9e_id":             it.N9EID,
-			"group_id":           it.GroupID,
-			"rule_id":            it.RuleID,
-			"severity":           it.Severity,
-			"tags":               it.Tags,
-			"route_name":         it.RouteName,
-			"dedup_key":           it.DedupKey,
-			"service_hash":        it.ServiceHash,
-			"group_name_before":   it.GroupNameBefore,
-			"group_name_after":    it.GroupNameAfter,
-			"rule_name_before":    it.RuleNameBefore,
-			"rule_name_after":     it.RuleNameAfter,
-			"entity_before":       it.EntityBefore,
-			"entity_after":        it.EntityAfter,
-			"matched_bindings":    matchedNames,
-			"final_robot_ids":     robotIDs,
+			"n9e_hash":          it.N9EHash,
+			"n9e_id":            it.N9EID,
+			"group_id":          it.GroupID,
+			"rule_id":           it.RuleID,
+			"severity":          it.Severity,
+			"tags":              it.Tags,
+			"route_name":        it.RouteName,
+			"dedup_key":         it.DedupKey,
+			"service_hash":      it.ServiceHash,
+			"group_name_before": it.GroupNameBefore,
+			"group_name_after":  it.GroupNameAfter,
+			"rule_name_before":  it.RuleNameBefore,
+			"rule_name_after":   it.RuleNameAfter,
+			"entity_before":     it.EntityBefore,
+			"entity_after":      it.EntityAfter,
+			"matched_bindings":  matchedNames,
+			"final_robot_ids":   robotIDs,
 		})
 	}
 
@@ -165,7 +189,13 @@ func workersMergeDingTalk(global config.DingTalkConfig, override config.DingTalk
 }
 
 func New(cfg config.Config, eng *engine.Engine, st *state.Store, ing *ingest.Manager, stats *telemetry.Stats) *Server {
-	return &Server{cfg: cfg, eng: eng, st: st, ing: ing, stt: stats}
+	rt := runtime.New(runtime.Snapshot{Cfg: cfg, Eng: eng})
+	repo := rulesrepo.New(cfg.DataDir)
+	return &Server{rt: rt, repo: repo, st: st, ing: ing, stt: stats}
+}
+
+func NewWithRuntime(rt *runtime.Runtime, repo *rulesrepo.Repo, st *state.Store, ing *ingest.Manager, rm *redismgr.Manager, stats *telemetry.Stats) *Server {
+	return &Server{rt: rt, repo: repo, st: st, ing: ing, rm: rm, stt: stats}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -178,11 +208,165 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/events/ingest", s.handleIngest)
 	mux.HandleFunc("/api/v1/routes/preview", s.handleRoutesPreview)
 	mux.HandleFunc("/api/v1/routes", s.handleRoutes)
+	mux.HandleFunc("/api/v1/rules/current", s.handleRulesCurrent)
+	mux.HandleFunc("/api/v1/rules/publish", s.handleRulesPublish)
+	mux.HandleFunc("/api/v1/rules/rollback", s.handleRulesRollback)
+	mux.HandleFunc("/api/v1/rules/audits", s.handleRulesAudits)
+	mux.HandleFunc("/api/v1/rules/versions", s.handleRulesVersions)
+	mux.HandleFunc("/api/v1/rules/version", s.handleRulesVersionGet)
 	mux.HandleFunc("/api/v1/alerts", s.handleAlerts)
 	mux.HandleFunc("/api/v1/alerts/get", s.handleAlertGet)
 
 	mux.Handle("/", s.spaHandler())
-	return mux
+	h := s.withAuth(mux)
+	h = s.withAccessLog(h)
+	return h
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *statusRecorder) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusRecorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += n
+	return n, err
+}
+
+func (s *Server) withAccessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		sw := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		if sw.status == 0 {
+			sw.status = http.StatusOK
+		}
+		dur := time.Since(start)
+		if s != nil && s.stt != nil {
+			s.stt.ObserveHTTP(sw.status, dur)
+		}
+		// 仅记录 API/ 以及异常（>=400），避免静态资源刷屏。
+		p := ""
+		if r.URL != nil {
+			p = r.URL.Path
+		}
+		if strings.HasPrefix(p, "/api/") || sw.status >= 400 {
+			log.Printf("http method=%s path=%s status=%d bytes=%d dur_ms=%d", r.Method, p, sw.status, sw.bytes, dur.Milliseconds())
+		}
+	})
+}
+
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		p := r.URL.Path
+		if p == "/api/v1/events/ingest" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(p, "/healthz") || strings.HasPrefix(p, "/readyz") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !strings.HasPrefix(p, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		snap := s.rt.Get()
+		want := strings.TrimSpace(snap.Cfg.APIToken)
+		if want == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		got := strings.TrimSpace(r.Header.Get("X-Token"))
+		if got == "" {
+			got = strings.TrimSpace(r.Header.Get("Authorization"))
+			got = strings.TrimPrefix(got, "Bearer ")
+			got = strings.TrimPrefix(got, "bearer ")
+			got = strings.TrimSpace(got)
+		}
+		if got == "" || got != want {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func maskSecret(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if len(v) <= 6 {
+		return "***"
+	}
+	return v[:2] + "***" + v[len(v)-2:]
+}
+
+func sanitizeRuleSet(rs rulesrepo.RuleSet) rulesrepo.RuleSet {
+	rs.N9E.UserToken = maskSecret(rs.N9E.UserToken)
+	rs.N9E.Authorization = maskSecret(rs.N9E.Authorization)
+	rs.Push.Token = maskSecret(rs.Push.Token)
+	rs.State.Redis.Password = maskSecret(rs.State.Redis.Password)
+	rs.DingTalk.Webhook = maskSecret(rs.DingTalk.Webhook)
+	rs.DingTalk.Secret = maskSecret(rs.DingTalk.Secret)
+	routes := make([]config.RouteConfig, 0, len(rs.Routes))
+	for i := range rs.Routes {
+		rc := rs.Routes[i]
+		rc.Notify.Webhook.URL = maskSecret(rc.Notify.Webhook.URL)
+		if len(rc.Notify.Webhook.Headers) > 0 {
+			h := make(map[string]string, len(rc.Notify.Webhook.Headers))
+			for k, v := range rc.Notify.Webhook.Headers {
+				h[k] = maskSecret(v)
+			}
+			rc.Notify.Webhook.Headers = h
+		}
+		if len(rc.Notify.Escalations) > 0 {
+			es := make([]config.EscalationConfig, 0, len(rc.Notify.Escalations))
+			for j := range rc.Notify.Escalations {
+				e := rc.Notify.Escalations[j]
+				e.Webhook.URL = maskSecret(e.Webhook.URL)
+				if len(e.Webhook.Headers) > 0 {
+					h2 := make(map[string]string, len(e.Webhook.Headers))
+					for k, v := range e.Webhook.Headers {
+						h2[k] = maskSecret(v)
+					}
+					e.Webhook.Headers = h2
+				}
+				es = append(es, e)
+			}
+			rc.Notify.Escalations = es
+		}
+		routes = append(routes, rc)
+	}
+	rs.Routes = routes
+	robots := make([]config.RobotConfig, 0, len(rs.Robots))
+	for i := range rs.Robots {
+		r := rs.Robots[i]
+		r.Webhook = maskSecret(r.Webhook)
+		r.Secret = maskSecret(r.Secret)
+		robots = append(robots, r)
+	}
+	rs.Robots = robots
+	return rs
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +395,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"time": time.Now().UTC().Format(time.RFC3339),
+		"time":  time.Now().UTC().Format(time.RFC3339),
 		"stats": snap,
 		"state": map[string]any{"active": active, "recovered": recovered, "total": total},
 	})
@@ -304,6 +488,8 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	snap := s.rt.Get()
+
 	type notifyItem struct {
 		Enabled               bool `json:"enabled"`
 		ObserveSeconds        int  `json:"observe_seconds"`
@@ -316,22 +502,24 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 		Enabled     bool                     `json:"enabled"`
 		Match       config.RouteMatchConfig  `json:"match"`
 		Dedup       config.DedupConfig       `json:"dedup"`
+		Processors  []config.ProcessorConfig `json:"processors"`
 		Notify      notifyItem               `json:"notify"`
 		DailyReport config.DailyReportConfig `json:"daily_report"`
 	}
 
-	items := make([]routeItem, 0, len(s.cfg.Routes))
-	for i := range s.cfg.Routes {
-		rc := s.cfg.Routes[i]
+	items := make([]routeItem, 0, len(snap.Cfg.Routes))
+	for i := range snap.Cfg.Routes {
+		rc := snap.Cfg.Routes[i]
 		name := strings.TrimSpace(rc.Name)
 		if name == "" {
 			name = "route-" + strconv.Itoa(i)
 		}
 		items = append(items, routeItem{
-			Name:    name,
-			Enabled: rc.Enabled,
-			Match:   rc.Match,
-			Dedup:   rc.Dedup,
+			Name:       name,
+			Enabled:    rc.Enabled,
+			Match:      rc.Match,
+			Dedup:      rc.Dedup,
+			Processors: rc.Processors,
 			Notify: notifyItem{
 				Enabled:               rc.Notify.Enabled,
 				ObserveSeconds:        rc.Notify.ObserveSeconds,
@@ -348,8 +536,48 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleRulesVersions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	items, err := s.repo.ListVersions()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"time":  time.Now().UTC().Format(time.RFC3339),
+		"items": items,
+	})
+}
+
+func (s *Server) handleRulesVersionGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	ver := strings.TrimSpace(r.URL.Query().Get("version"))
+	if ver == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "version is required"})
+		return
+	}
+	rs, hash, err := s.repo.ReadVersion(ver)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rulesVersionGetResponse{
+		Time:    time.Now().UTC().Format(time.RFC3339),
+		Version: ver,
+		Hash:    hash,
+		Rules:   sanitizeRuleSet(rs),
+	})
+}
+
 func (s *Server) spaHandler() http.Handler {
-	fs := http.FileServer(http.Dir(s.cfg.WebDir))
+	snap := s.rt.Get()
+	fs := http.FileServer(http.Dir(snap.Cfg.WebDir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if p == "" {
@@ -361,7 +589,7 @@ func (s *Server) spaHandler() http.Handler {
 		}
 		rel := strings.TrimPrefix(clean, "/")
 		if rel != "" {
-			full := filepath.Join(s.cfg.WebDir, filepath.FromSlash(rel))
+			full := filepath.Join(snap.Cfg.WebDir, filepath.FromSlash(rel))
 			st, err := os.Stat(full)
 			if err == nil {
 				if !st.IsDir() {
@@ -377,7 +605,7 @@ func (s *Server) spaHandler() http.Handler {
 			}
 		}
 
-		indexPath := filepath.Join(s.cfg.WebDir, "index.html")
+		indexPath := filepath.Join(snap.Cfg.WebDir, "index.html")
 		if _, err := os.Stat(indexPath); err == nil {
 			http.ServeFile(w, r, indexPath)
 			return
@@ -395,7 +623,8 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	st := s.eng.Status()
+	snap := s.rt.Get()
+	st := snap.Eng.Status()
 	active, recovered, total := s.st.Summary()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"time":   time.Now().UTC().Format(time.RFC3339),
@@ -417,13 +646,18 @@ func (s *Server) handlePullRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
-	res, err := s.eng.RunOnce(ctx)
+	snap := s.rt.Get()
+	if strings.TrimSpace(snap.Cfg.N9E.BaseURL) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "n9e.base_url is empty"})
+		return
+	}
+	res, err := snap.Eng.RunOnce(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 
-	if err := s.st.SaveToFile(s.cfg.State.SnapshotFile); err != nil {
+	if err := s.st.SaveToFile(snap.Cfg.State.SnapshotFile); err != nil {
 		log.Printf("save snapshot: %v", err)
 	}
 
@@ -431,8 +665,131 @@ func (s *Server) handlePullRun(w http.ResponseWriter, r *http.Request) {
 		"ok":     true,
 		"time":   time.Now().UTC().Format(time.RFC3339),
 		"result": res,
-		"engine": s.eng.Status(),
+		"engine": snap.Eng.Status(),
 	})
+}
+
+func (s *Server) handleRulesCurrent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	snap := s.rt.Get()
+	rs := sanitizeRuleSet(rulesrepo.ExtractFromConfig(snap.Cfg))
+	_, hash, ok, err := s.repo.LoadCurrent()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"time":   time.Now().UTC().Format(time.RFC3339),
+		"hash":   hash,
+		"exists": ok,
+		"rules":  rs,
+	})
+}
+
+func (s *Server) handleRulesPublish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req publishRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	ver, hash, err := s.repo.Publish(req.RuleSet, req.Message, req.Actor)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	snap := s.rt.Get()
+	newCfg := rulesrepo.ApplyToConfig(snap.Cfg, req.RuleSet)
+	eng, err := engine.New(newCfg, s.st)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	s.safelySwapRuntime(newCfg, eng)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"time":    time.Now().UTC().Format(time.RFC3339),
+		"version": ver,
+		"hash":    hash,
+	})
+}
+
+func (s *Server) handleRulesRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req rollbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	ver, hash, err := s.repo.Rollback(req.Version, req.Message, req.Actor)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	rs, _, ok, err := s.repo.LoadCurrent()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "current not found"})
+		return
+	}
+	snap := s.rt.Get()
+	newCfg := rulesrepo.ApplyToConfig(snap.Cfg, rs)
+	eng, err := engine.New(newCfg, s.st)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	s.safelySwapRuntime(newCfg, eng)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"time":    time.Now().UTC().Format(time.RFC3339),
+		"version": ver,
+		"hash":    hash,
+	})
+}
+
+func (s *Server) handleRulesAudits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	q := r.URL.Query()
+	limit := atoi(q.Get("limit"), 50)
+	items, err := s.repo.ListAudits(limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"time":  time.Now().UTC().Format(time.RFC3339),
+		"items": items,
+	})
+}
+
+func (s *Server) safelySwapRuntime(cfg config.Config, eng *engine.Engine) {
+	if s == nil || s.rt == nil {
+		return
+	}
+	s.rt.Swap(runtime.Snapshot{Cfg: cfg, Eng: eng})
+	if s.ing != nil {
+		s.ing.SetEngine(eng)
+		s.ing.SetConfig(cfg.Push, cfg.State)
+	}
+	if s.rm != nil {
+		s.rm.Apply(cfg.State.Redis)
+	}
 }
 
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {

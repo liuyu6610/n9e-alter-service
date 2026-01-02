@@ -43,6 +43,48 @@ go run . -config config.json
 
 打开：`http://127.0.0.1:8080/`
 
+### 本地联调：Push 造事件 + Webhook 接收（无需 N9E 环境）
+
+项目内置了一套本地联调用的最小配置与脚本：`tools/local-test/`。
+
+1) 启动本地 Webhook 接收器（新开一个 PowerShell 窗口）：
+
+```powershell
+./tools/local-test/webhook-receiver.ps1
+```
+
+默认监听：`http://127.0.0.1:18080/`，收到的 payload 会落盘到：`tools/local-test/out/`。
+
+1) 启动服务（新开一个 PowerShell 窗口）：
+
+```powershell
+./tools/local-test/start-service.ps1
+```
+
+该脚本会使用：`tools/local-test/config.local.json`（已启用 `push.enabled=true` 与示例 webhook/escalations）。
+
+1) Push 造事件（第三个 PowerShell 窗口）：
+
+```powershell
+./tools/local-test/push-event.ps1
+```
+
+（可选）一键验收（自动等待 /webhook 与 /escalation 落盘，并检查 active 告警字段更新）：
+
+```powershell
+./tools/local-test/verify.ps1
+```
+
+正常情况下：
+
+- `POST /api/v1/events/ingest` 返回 `{"ok":true,"accepted":1,...}`
+- `webhook-receiver.ps1` 会打印并保存 webhook 请求体
+
+说明：
+
+- `POST /api/v1/events/ingest` 的鉴权由 `push.token` 控制（见 `config.local.json`）；该 endpoint 不受全局 `api_token` 影响，便于本地联调。
+- 你也可以在 Web UI 的 Settings 页面修改 routes/silences 并发布，以验证热更新与回滚。
+
 ### 常用 API
 
 - `GET /healthz`

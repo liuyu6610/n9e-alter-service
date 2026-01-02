@@ -1,0 +1,76 @@
+{
+  "addr": ":8080",
+  "web_dir": "web/dist",
+  "data_dir": "data",
+  "api_token": "",
+  "pull": {
+    "interval_seconds": 3600
+  },
+  "push": {
+    "enabled": true,
+    "token": "push-token-123",
+    "queue_size": 20000,
+    "worker_count": 2,
+    "enqueue_timeout_milli": 30000
+  },
+  "routes": [
+    {
+      "name": "default",
+      "enabled": true,
+      "match": {
+        "group_name_regex": ".*",
+        "rule_name_regex": ".*",
+        "severity_in": []
+      },
+      "dedup": {
+        "mode": "n9e_hash",
+        "include_group_id": true,
+        "include_group_name": true,
+        "include_rule_id": true,
+        "include_rule_name": true,
+        "include_severity": true,
+        "include_entity": true,
+        "normalize_pod_name": false,
+        "rewrites": []
+      },
+      "notify": {
+        "enabled": true,
+        "observe_seconds": 0,
+        "repeat_interval_seconds": 15,
+        "send_recovered": true,
+        "webhook": {
+          "enabled": true,
+          "url": "http://127.0.0.1:18080/webhook",
+          "timeout_seconds": 5,
+          "headers": {
+            "X-Demo": "n9e-alter-service"
+          }
+        },
+        "escalations": [
+          {
+            "after_seconds": 10,
+            "repeat_interval_seconds": 10,
+            "robot_ids": [],
+            "webhook": {
+              "enabled": true,
+              "url": "http://127.0.0.1:18080/escalation",
+              "timeout_seconds": 5,
+              "headers": {
+                "X-Escalation": "step"
+              }
+            }
+          }
+        ]
+      },
+      "daily_report": {
+        "enabled": false,
+        "cron": "0 18 * * *",
+        "title_prefix": "N9E 告警日报",
+        "max_lines": 50,
+        "max_chars": 15000,
+        "clear_mode": "reset_notified"
+      }
+    }
+  ],
+  "silences": []
+}

@@ -38,6 +38,37 @@ export interface RewriteRule {
   replace: string
 }
 
+export interface ProcessorDrop {
+  when: string
+}
+
+export interface ProcessorRelabelRule {
+  target: string
+  pattern: string
+  replace: string
+}
+
+export interface ProcessorRelabel {
+  rules: ProcessorRelabelRule[]
+}
+
+export interface ProcessorUpdateSet {
+  field: string
+  value: string
+}
+
+export interface ProcessorUpdate {
+  sets: ProcessorUpdateSet[]
+}
+
+export interface ProcessorConfig {
+  type: string
+  enabled: boolean
+  drop?: ProcessorDrop
+  relabel?: ProcessorRelabel
+  update?: ProcessorUpdate
+}
+
 export interface RouteDedup {
   mode: string
   include_group_id: boolean
@@ -57,6 +88,50 @@ export interface RouteNotify {
   send_recovered: boolean
 }
 
+export interface WebhookConfig {
+  enabled: boolean
+  url: string
+  timeout_seconds: number
+  headers?: Record<string, string>
+}
+
+export interface SilenceRule {
+  name: string
+  enabled: boolean
+  route_name: string
+  tags?: Record<string, string>
+  tag_regex?: Record<string, string>
+  expires_at_unix: number
+}
+
+export interface EscalationConfig {
+  after_seconds: number
+  repeat_interval_seconds: number
+  robot_ids: string[]
+  webhook: WebhookConfig
+}
+
+export interface RuleRouteNotify {
+  enabled: boolean
+  dingtalk: DingTalkConfig
+  webhook: WebhookConfig
+  robot_id: string
+  observe_seconds: number
+  repeat_interval_seconds: number
+  send_recovered: boolean
+  escalations: EscalationConfig[]
+}
+
+export interface RuleRouteConfig {
+  name: string
+  enabled: boolean
+  match: RouteMatch
+  dedup: RouteDedup
+  processors?: ProcessorConfig[]
+  notify: RuleRouteNotify
+  daily_report: RouteDailyReport
+}
+
 export interface RouteDailyReport {
   enabled: boolean
   cron: string
@@ -71,6 +146,7 @@ export interface RouteItem {
   enabled: boolean
   match: RouteMatch
   dedup: RouteDedup
+  processors?: ProcessorConfig[]
   notify: RouteNotify
   daily_report: RouteDailyReport
 }
@@ -148,4 +224,156 @@ export interface PreviewItem {
 export interface PreviewResponse {
   time: string
   items: PreviewItem[]
+}
+
+export interface N9EConfig {
+  base_url: string
+  api_path: string
+  user_token: string
+  authorization: string
+  timeout_seconds: number
+  verify_tls: boolean
+}
+
+export interface PullConfig {
+  interval_seconds: number
+  page_limit: number
+  max_pages: number
+  my_groups: boolean
+  hours: number
+  stime: number
+  etime: number
+  query: string
+  severity: string
+  prods: string
+  rule_prods: string
+  cate: string
+  rid: number
+  event_ids: string
+}
+
+export interface RedisConfig {
+  enabled: boolean
+  addr: string
+  password: string
+  db: number
+  key_prefix: string
+  hot_ttl_seconds: number
+  ttl_seconds: number
+}
+
+export interface StateConfig {
+  snapshot_file: string
+  snapshot_interval_seconds: number
+  retain_recovered_seconds: number
+  recover_miss_count: number
+  redis: RedisConfig
+}
+
+export interface PushConfig {
+  enabled: boolean
+  token: string
+  queue_size: number
+  worker_count: number
+  enqueue_timeout_milli: number
+}
+
+export interface DingTalkConfig {
+  webhook: string
+  secret: string
+  keyword: string
+}
+
+export interface RobotConfig {
+  id: string
+  webhook: string
+  secret: string
+  keyword: string
+  fallback_robot_ids: string[]
+}
+
+export interface BindingRule {
+  name: string
+  priority: number
+  enabled: boolean
+  robot_id: string
+  robot_ids: string[]
+  group_id: number
+  group_name_regex: string
+  rule_id: number
+  rule_name_regex: string
+  route_name: string
+  tags?: Record<string, string>
+  tag_regex?: Record<string, string>
+}
+
+export interface RuleSet {
+  n9e: N9EConfig
+  pull: PullConfig
+  push: PushConfig
+  state: StateConfig
+  silences: SilenceRule[]
+  routes: RuleRouteConfig[]
+  robots: RobotConfig[]
+  bindings: BindingRule[]
+  dingtalk: DingTalkConfig
+}
+
+export interface RulesCurrentResponse {
+  time: string
+  hash: string
+  exists: boolean
+  rules: RuleSet
+}
+
+export interface RulesPublishRequest {
+  rules: RuleSet
+  message: string
+  actor: string
+}
+
+export interface RulesPublishResponse {
+  ok: boolean
+  time: string
+  version: string
+  hash: string
+}
+
+export interface RulesVersionsResponse {
+  time: string
+  items: string[]
+}
+
+export interface RulesVersionGetResponse {
+  time: string
+  version: string
+  hash: string
+  rules: RuleSet
+}
+
+export interface AuditRecord {
+  at_unix: number
+  action: string
+  version: string
+  hash: string
+  message: string
+  actor: string
+}
+
+export interface RulesAuditsResponse {
+  time: string
+  items: AuditRecord[]
+}
+
+export interface RulesRollbackRequest {
+  version: string
+  message: string
+  actor: string
+}
+
+export interface RulesRollbackResponse {
+  ok: boolean
+  time: string
+  version: string
+  hash: string
 }

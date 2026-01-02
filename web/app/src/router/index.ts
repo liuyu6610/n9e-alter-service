@@ -5,6 +5,7 @@ import Alerts from '../views/Alerts.vue'
 import Routes from '../views/Routes.vue'
 import Preview from '../views/Preview.vue'
 import RuleEditor from '../views/RuleEditor.vue'
+import Settings from '../views/Settings.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -12,6 +13,7 @@ const router = createRouter({
     { path: '/', name: 'Dashboard', component: Dashboard },
     { path: '/alerts', name: 'Alerts', component: Alerts },
     { path: '/routes', name: 'Routes', component: Routes },
+    { path: '/settings', name: 'Settings', component: Settings },
     { path: '/preview', name: 'Preview', component: Preview },
     { path: '/rule-editor', name: 'RuleEditor', component: RuleEditor },
     { path: '/:pathMatch(.*)*', redirect: '/' },

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -13,6 +14,7 @@ import (
 	"n9e-alter-service/internal/config"
 	"n9e-alter-service/internal/engine"
 	"n9e-alter-service/internal/n9e"
+	"n9e-alter-service/internal/redismgr"
 	"n9e-alter-service/internal/state"
 	"n9e-alter-service/internal/telemetry"
 )
@@ -20,40 +22,79 @@ import (
 var ErrQueueFull = errors.New("ingest queue full")
 
 type Manager struct {
-	cfg config.PushConfig
-	stateCfg config.StateConfig
-	eng *engine.Engine
-	st  *state.Store
-	rdb *redis.Client
-	stt *telemetry.Stats
+	cfgV      atomic.Value
+	stateCfgV atomic.Value
+	eng       atomic.Value
+	st        *state.Store
+	rm        *redismgr.Manager
+	stt       *telemetry.Stats
 
 	queue chan []n9e.CurEvent
 }
 
-func New(cfg config.PushConfig, stateCfg config.StateConfig, eng *engine.Engine, st *state.Store, rdb *redis.Client, stats *telemetry.Stats) *Manager {
+func New(cfg config.PushConfig, stateCfg config.StateConfig, eng *engine.Engine, st *state.Store, rm *redismgr.Manager, stats *telemetry.Stats) *Manager {
 	qsize := cfg.QueueSize
 	if qsize <= 0 {
 		qsize = 20000
 	}
-	return &Manager{cfg: cfg, stateCfg: stateCfg, eng: eng, st: st, rdb: rdb, stt: stats, queue: make(chan []n9e.CurEvent, qsize)}
+	m := &Manager{st: st, rm: rm, stt: stats, queue: make(chan []n9e.CurEvent, qsize)}
+	m.cfgV.Store(cfg)
+	m.stateCfgV.Store(stateCfg)
+	m.eng.Store(eng)
+	return m
+}
+
+func (m *Manager) SetEngine(eng *engine.Engine) {
+	if m == nil {
+		return
+	}
+	m.eng.Store(eng)
+}
+
+func (m *Manager) getEngine() *engine.Engine {
+	if m == nil {
+		return nil
+	}
+	v := m.eng.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(*engine.Engine)
 }
 
 func (m *Manager) Enabled() bool {
-	return m != nil && m.cfg.Enabled
+	if m == nil {
+		return false
+	}
+	cfg, _ := m.cfgV.Load().(config.PushConfig)
+	return cfg.Enabled
 }
 
 func (m *Manager) Token() string {
 	if m == nil {
 		return ""
 	}
-	return m.cfg.Token
+	cfg, _ := m.cfgV.Load().(config.PushConfig)
+	return cfg.Token
+}
+
+func (m *Manager) SetConfig(cfg config.PushConfig, stateCfg config.StateConfig) {
+	if m == nil {
+		return
+	}
+	m.cfgV.Store(cfg)
+	m.stateCfgV.Store(stateCfg)
 }
 
 func (m *Manager) Start(ctx context.Context) {
-	if m == nil || !m.cfg.Enabled {
+	if m == nil {
 		return
 	}
-	wc := m.cfg.WorkerCount
+	cfg, _ := m.cfgV.Load().(config.PushConfig)
+	if !cfg.Enabled {
+		return
+	}
+	wc := cfg.WorkerCount
 	if wc <= 0 {
 		wc = 8
 	}
@@ -63,7 +104,11 @@ func (m *Manager) Start(ctx context.Context) {
 }
 
 func (m *Manager) Enqueue(ctx context.Context, batch []n9e.CurEvent) error {
-	if m == nil || !m.cfg.Enabled {
+	if m == nil {
+		return fmt.Errorf("push ingest disabled")
+	}
+	cfg, _ := m.cfgV.Load().(config.PushConfig)
+	if !cfg.Enabled {
 		return fmt.Errorf("push ingest disabled")
 	}
 	if len(batch) == 0 {
@@ -74,7 +119,7 @@ func (m *Manager) Enqueue(ctx context.Context, batch []n9e.CurEvent) error {
 		m.stt.IncIngestEvents(uint64(len(batch)))
 	}
 
-	tmoMs := m.cfg.EnqueueTimeoutMilli
+	tmoMs := cfg.EnqueueTimeoutMilli
 	if tmoMs < 0 {
 		tmoMs = 0
 	}
@@ -117,16 +162,25 @@ func (m *Manager) worker(ctx context.Context) {
 			if len(batch) == 0 {
 				continue
 			}
-			inputs := m.eng.BuildInputEvents(batch)
+			eng := m.getEngine()
+			if eng == nil {
+				continue
+			}
+			inputs := eng.BuildInputEvents(batch)
 			if m.stt != nil {
 				m.stt.IncBuildInputs(uint64(len(inputs)))
 			}
 			if len(inputs) == 0 {
 				continue
 			}
-			if m.rdb != nil && m.stateCfg.Redis.Enabled {
-				m.aggregateBuckets(ctx, inputs)
-				inputs = m.dedupGate(ctx, inputs)
+			stateCfg, _ := m.stateCfgV.Load().(config.StateConfig)
+			rdb := (*redis.Client)(nil)
+			if m.rm != nil {
+				rdb = m.rm.Get()
+			}
+			if rdb != nil && stateCfg.Redis.Enabled {
+				m.aggregateBuckets(ctx, rdb, stateCfg, inputs)
+				inputs = m.dedupGate(ctx, rdb, stateCfg, inputs)
 				if len(inputs) == 0 {
 					continue
 				}
@@ -136,27 +190,27 @@ func (m *Manager) worker(ctx context.Context) {
 	}
 }
 
-func (m *Manager) aggregateBuckets(ctx context.Context, inputs []state.InputEvent) {
-	if m == nil || m.rdb == nil || len(inputs) == 0 {
+func (m *Manager) aggregateBuckets(ctx context.Context, rdb *redis.Client, stateCfg config.StateConfig, inputs []state.InputEvent) {
+	if m == nil || rdb == nil || len(inputs) == 0 {
 		return
 	}
-	if strings.TrimSpace(m.stateCfg.Redis.Addr) == "" {
+	if strings.TrimSpace(stateCfg.Redis.Addr) == "" {
 		return
 	}
 
-	prefix := strings.TrimSpace(m.stateCfg.Redis.KeyPrefix)
+	prefix := strings.TrimSpace(stateCfg.Redis.KeyPrefix)
 	if prefix == "" {
 		prefix = "n9e_alter"
 	}
 
 	// 热状态窗口（默认 1 天）：dedup/bucket 的 TTL。
-	ttlSec := m.stateCfg.Redis.HotTTLSeconds
+	ttlSec := stateCfg.Redis.HotTTLSeconds
 	if ttlSec <= 0 {
 		ttlSec = 86400
 	}
 	ttl := time.Duration(ttlSec) * time.Second
 
-	pipe := m.rdb.Pipeline()
+	pipe := rdb.Pipeline()
 	writes := 0
 	for i := range inputs {
 		it := inputs[i]
@@ -196,27 +250,27 @@ func (m *Manager) aggregateBuckets(ctx context.Context, inputs []state.InputEven
 	}
 }
 
-func (m *Manager) dedupGate(ctx context.Context, inputs []state.InputEvent) []state.InputEvent {
-	if m == nil || m.rdb == nil || len(inputs) == 0 {
+func (m *Manager) dedupGate(ctx context.Context, rdb *redis.Client, stateCfg config.StateConfig, inputs []state.InputEvent) []state.InputEvent {
+	if m == nil || rdb == nil || len(inputs) == 0 {
 		return inputs
 	}
-	if strings.TrimSpace(m.stateCfg.Redis.Addr) == "" {
+	if strings.TrimSpace(stateCfg.Redis.Addr) == "" {
 		return inputs
 	}
 	// 热状态窗口（默认 1 天）：dedup/bucket 的 TTL。
-	ttlSec := m.stateCfg.Redis.HotTTLSeconds
+	ttlSec := stateCfg.Redis.HotTTLSeconds
 	if ttlSec <= 0 {
 		ttlSec = 86400
 	}
 	ttl := time.Duration(ttlSec) * time.Second
 
-	prefix := strings.TrimSpace(m.stateCfg.Redis.KeyPrefix)
+	prefix := strings.TrimSpace(stateCfg.Redis.KeyPrefix)
 	if prefix == "" {
 		prefix = "n9e_alter"
 	}
 
 	// 单副本下，SET NX EX 足够；redis 异常走 fail-open（整批放行），避免影响可用性。
-	pipe := m.rdb.Pipeline()
+	pipe := rdb.Pipeline()
 	cmds := make([]*redis.BoolCmd, 0, len(inputs))
 	idx := make([]int, 0, len(inputs))
 	out := make([]state.InputEvent, 0, len(inputs))

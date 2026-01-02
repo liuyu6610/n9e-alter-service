@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"n9e-alter-service/internal/config"
@@ -50,7 +52,23 @@ type compiledRoute struct {
 	groupRe     *regexp.Regexp
 	ruleRe      *regexp.Regexp
 	severitySet map[int]struct{}
+	processors  []compiledProcessor
 	rewrites    []compiledRewrite
+}
+
+type compiledProcessor struct {
+	typ string
+
+	dropWhen *template.Template
+
+	relabel []compiledRelabelRule
+	updates []config.UpdateSet
+}
+
+type compiledRelabelRule struct {
+	target  string
+	re      *regexp.Regexp
+	replace string
 }
 
 type compiledRewrite struct {
@@ -110,12 +128,18 @@ func New(cfg config.Config, st *state.Store) (*Engine, error) {
 			rewrites = append(rewrites, compiledRewrite{field: field, re: re, replace: rw.Replace})
 		}
 
+		procs, err := compileProcessors(name, rc.Processors)
+		if err != nil {
+			return nil, err
+		}
+
 		routes = append(routes, &compiledRoute{
 			cfg:         rc,
 			name:        name,
 			groupRe:     groupRe,
 			ruleRe:      ruleRe,
 			severitySet: sevSet,
+			processors:  procs,
 			rewrites:    rewrites,
 		})
 	}
@@ -139,12 +163,12 @@ func (e *Engine) BuildInputEvents(evs []n9e.CurEvent) []state.InputEvent {
 }
 
 type PreviewItem struct {
-	N9EHash string            `json:"n9e_hash"`
-	N9EID   int64             `json:"n9e_id"`
-	GroupID int64             `json:"group_id"`
-	RuleID  int64             `json:"rule_id"`
-	Severity int              `json:"severity"`
-	Tags    map[string]string `json:"tags"`
+	N9EHash  string            `json:"n9e_hash"`
+	N9EID    int64             `json:"n9e_id"`
+	GroupID  int64             `json:"group_id"`
+	RuleID   int64             `json:"rule_id"`
+	Severity int               `json:"severity"`
+	Tags     map[string]string `json:"tags"`
 
 	RouteName   string `json:"route_name"`
 	DedupKey    string `json:"dedup_key"`
@@ -173,8 +197,15 @@ func (e *Engine) PreviewInputs(evs []n9e.CurEvent) []PreviewItem {
 			continue
 		}
 
-		tags := applyTagRewrites(rt.rewrites, tagsToMap(ev))
+		tags := tagsToMap(ev)
+		groupName, ruleName, tags, dropped := applyProcessors(rt.processors, ev, groupName, ruleName, tags)
+		if dropped {
+			continue
+		}
+
+		tags = applyTagRewrites(rt.rewrites, tags)
 		entityKey, entityDisp := pickEntity(ev, tags, rt.cfg.Dedup.NormalizePodName)
+		entityKey, entityDisp = applyProcessorsEntity(rt.processors, entityKey, entityDisp)
 
 		groupName2 := applyRewrites(rt.rewrites, "group_name", groupName)
 		ruleName2 := applyRewrites(rt.rewrites, "rule_name", ruleName)
@@ -185,21 +216,21 @@ func (e *Engine) PreviewInputs(evs []n9e.CurEvent) []PreviewItem {
 		serviceHash := hashKey(rt.name + "|" + dedupKey)
 
 		out = append(out, PreviewItem{
-			N9EHash:          strings.TrimSpace(ev.Hash),
-			N9EID:            ev.ID,
-			GroupID:          ev.GroupID,
-			RuleID:           ev.RuleID,
-			Severity:         sev,
-			Tags:             tags,
-			RouteName:        rt.name,
-			DedupKey:         dedupKey,
-			ServiceHash:      serviceHash,
-			GroupNameBefore:  groupName,
-			GroupNameAfter:   groupName2,
-			RuleNameBefore:   ruleName,
-			RuleNameAfter:    ruleName2,
-			EntityBefore:     entityDisp,
-			EntityAfter:      entityDisp2,
+			N9EHash:         strings.TrimSpace(ev.Hash),
+			N9EID:           ev.ID,
+			GroupID:         ev.GroupID,
+			RuleID:          ev.RuleID,
+			Severity:        sev,
+			Tags:            tags,
+			RouteName:       rt.name,
+			DedupKey:        dedupKey,
+			ServiceHash:     serviceHash,
+			GroupNameBefore: groupName,
+			GroupNameAfter:  groupName2,
+			RuleNameBefore:  ruleName,
+			RuleNameAfter:   ruleName2,
+			EntityBefore:    entityDisp,
+			EntityAfter:     entityDisp2,
 		})
 	}
 	return out
@@ -275,8 +306,15 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 			continue
 		}
 
-		tags := applyTagRewrites(rt.rewrites, tagsToMap(ev))
+		tags := tagsToMap(ev)
+		groupName, ruleName, tags, dropped := applyProcessors(rt.processors, ev, groupName, ruleName, tags)
+		if dropped {
+			continue
+		}
+
+		tags = applyTagRewrites(rt.rewrites, tags)
 		entityKey, entityDisp := pickEntity(ev, tags, rt.cfg.Dedup.NormalizePodName)
+		entityKey, entityDisp = applyProcessorsEntity(rt.processors, entityKey, entityDisp)
 
 		groupName2 := applyRewrites(rt.rewrites, "group_name", groupName)
 		ruleName2 := applyRewrites(rt.rewrites, "rule_name", ruleName)
@@ -454,4 +492,197 @@ func normalizeTs(ts int64) int64 {
 		return ts / 1000
 	}
 	return ts
+}
+
+type dropEvalData struct {
+	Event n9e.CurEvent
+	Tags  map[string]string
+	Group string
+	Rule  string
+	Sev   int
+}
+
+func compileProcessors(routeName string, pcs []config.ProcessorConfig) ([]compiledProcessor, error) {
+	if len(pcs) == 0 {
+		return nil, nil
+	}
+	out := make([]compiledProcessor, 0, len(pcs))
+	for i := range pcs {
+		pc := pcs[i]
+		if !pc.Enabled {
+			continue
+		}
+		typ := strings.ToLower(strings.TrimSpace(pc.Type))
+		if typ == "" {
+			continue
+		}
+		switch typ {
+		case "drop":
+			when := ""
+			if pc.Drop != nil {
+				when = strings.TrimSpace(pc.Drop.When)
+			}
+			if when == "" {
+				continue
+			}
+			tmpl, err := template.New("drop_when").Option("missingkey=zero").Parse(when)
+			if err != nil {
+				return nil, fmt.Errorf("route %s processor[%d] drop.when: %w", routeName, i, err)
+			}
+			out = append(out, compiledProcessor{typ: typ, dropWhen: tmpl})
+		case "relabel":
+			if pc.Relabel == nil || len(pc.Relabel.Rules) == 0 {
+				continue
+			}
+			rules := make([]compiledRelabelRule, 0, len(pc.Relabel.Rules))
+			for j := range pc.Relabel.Rules {
+				r := pc.Relabel.Rules[j]
+				target := strings.TrimSpace(r.Target)
+				pat := strings.TrimSpace(r.Pattern)
+				if target == "" || pat == "" {
+					continue
+				}
+				re, err := regexp.Compile(pat)
+				if err != nil {
+					return nil, fmt.Errorf("route %s processor[%d] relabel.rules[%d] pattern: %w", routeName, i, j, err)
+				}
+				rules = append(rules, compiledRelabelRule{target: target, re: re, replace: r.Replace})
+			}
+			if len(rules) == 0 {
+				continue
+			}
+			out = append(out, compiledProcessor{typ: typ, relabel: rules})
+		case "update":
+			if pc.Update == nil || len(pc.Update.Sets) == 0 {
+				continue
+			}
+			out = append(out, compiledProcessor{typ: typ, updates: pc.Update.Sets})
+		default:
+			continue
+		}
+	}
+	return out, nil
+}
+
+func applyProcessors(pcs []compiledProcessor, ev n9e.CurEvent, groupName string, ruleName string, tags map[string]string) (string, string, map[string]string, bool) {
+	if len(pcs) == 0 {
+		return groupName, ruleName, tags, false
+	}
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	sev := ev.Severity
+	for i := range pcs {
+		p := pcs[i]
+		switch p.typ {
+		case "drop":
+			if p.dropWhen == nil {
+				continue
+			}
+			var b bytes.Buffer
+			if err := p.dropWhen.Execute(&b, dropEvalData{Event: ev, Tags: tags, Group: groupName, Rule: ruleName, Sev: sev}); err != nil {
+				continue
+			}
+			s := strings.TrimSpace(b.String())
+			if s == "" {
+				continue
+			}
+			if s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes") {
+				return groupName, ruleName, tags, true
+			}
+		case "relabel":
+			for _, rr := range p.relabel {
+				applyRelabel(&groupName, &ruleName, tags, rr)
+			}
+		case "update":
+			for _, u := range p.updates {
+				applyUpdate(&groupName, &ruleName, tags, u)
+			}
+		}
+	}
+	return groupName, ruleName, tags, false
+}
+
+func applyProcessorsEntity(pcs []compiledProcessor, entityKey string, entityDisp string) (string, string) {
+	if len(pcs) == 0 {
+		return entityKey, entityDisp
+	}
+	for i := range pcs {
+		p := pcs[i]
+		switch p.typ {
+		case "relabel":
+			for _, rr := range p.relabel {
+				if !strings.EqualFold(strings.TrimSpace(rr.target), "entity") {
+					continue
+				}
+				entityKey = rr.re.ReplaceAllString(entityKey, rr.replace)
+				entityDisp = rr.re.ReplaceAllString(entityDisp, rr.replace)
+			}
+		case "update":
+			for _, u := range p.updates {
+				if !strings.EqualFold(strings.TrimSpace(u.Field), "entity") {
+					continue
+				}
+				entityKey = u.Value
+				entityDisp = u.Value
+			}
+		}
+	}
+	return entityKey, entityDisp
+}
+
+func applyRelabel(groupName *string, ruleName *string, tags map[string]string, rr compiledRelabelRule) {
+	target := strings.TrimSpace(rr.target)
+	if target == "" || rr.re == nil {
+		return
+	}
+	if strings.EqualFold(target, "group_name") {
+		*groupName = rr.re.ReplaceAllString(*groupName, rr.replace)
+		return
+	}
+	if strings.EqualFold(target, "rule_name") {
+		*ruleName = rr.re.ReplaceAllString(*ruleName, rr.replace)
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(target), "tag:") {
+		k := strings.TrimSpace(target[len("tag:"):])
+		if k == "" {
+			return
+		}
+		if tags == nil {
+			return
+		}
+		v, ok := tags[k]
+		if !ok {
+			return
+		}
+		tags[k] = rr.re.ReplaceAllString(v, rr.replace)
+		return
+	}
+}
+
+func applyUpdate(groupName *string, ruleName *string, tags map[string]string, u config.UpdateSet) {
+	field := strings.TrimSpace(u.Field)
+	if field == "" {
+		return
+	}
+	if strings.EqualFold(field, "group_name") {
+		*groupName = u.Value
+		return
+	}
+	if strings.EqualFold(field, "rule_name") {
+		*ruleName = u.Value
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(field), "tag:") {
+		k := strings.TrimSpace(field[len("tag:"):])
+		if k == "" {
+			return
+		}
+		if tags == nil {
+			return
+		}
+		tags[k] = u.Value
+		return
+	}
 }

@@ -30,15 +30,18 @@ type Record struct {
 	RecoveredAt  int64 `json:"recovered_at"`
 	LastNotified int64 `json:"last_notified"`
 
+	LastEscalatedAt int64 `json:"last_escalated_at"`
+	EscalatedStep   int   `json:"escalated_step"`
+
 	N9EHash string `json:"n9e_hash"`
 	N9EID   int64  `json:"n9e_id"`
 
-	GroupID   int64  `json:"group_id"`
-	GroupName string `json:"group_name"`
-	RuleID    int64  `json:"rule_id"`
-	RuleName  string `json:"rule_name"`
-	Severity  int    `json:"severity"`
-	Entity    string `json:"entity"`
+	GroupID   int64             `json:"group_id"`
+	GroupName string            `json:"group_name"`
+	RuleID    int64             `json:"rule_id"`
+	RuleName  string            `json:"rule_name"`
+	Severity  int               `json:"severity"`
+	Entity    string            `json:"entity"`
 	Tags      map[string]string `json:"tags"`
 
 	FirstTriggerTime int64 `json:"first_trigger_time"`
@@ -157,6 +160,8 @@ func (s *Store) ApplyIngest(now time.Time, items []InputEvent) ApplyResult {
 				MissCount:        0,
 				RecoveredAt:      0,
 				LastNotified:     0,
+				LastEscalatedAt:  0,
+				EscalatedStep:    0,
 				N9EHash:          it.N9EHash,
 				N9EID:            it.N9EID,
 				GroupID:          it.GroupID,
@@ -181,6 +186,8 @@ func (s *Store) ApplyIngest(now time.Time, items []InputEvent) ApplyResult {
 			r.FirstSeenAt = nowUnix
 			r.RecoveredAt = 0
 			r.LastNotified = 0
+			r.LastEscalatedAt = 0
+			r.EscalatedStep = 0
 			r.MissCount = 0
 			res.NewActives = append(res.NewActives, *r)
 			s.markDirtyLocked()
@@ -544,6 +551,27 @@ func (s *Store) MarkNotified(serviceHash string, ts int64) bool {
 		return false
 	}
 	r.LastNotified = ts
+	s.markDirtyLocked()
+	s.mu.Unlock()
+	return true
+}
+
+func (s *Store) MarkEscalated(serviceHash string, step int, ts int64) bool {
+	serviceHash = stringsTrim(serviceHash)
+	if serviceHash == "" {
+		return false
+	}
+	if step < 0 {
+		step = 0
+	}
+	s.mu.Lock()
+	r, ok := s.records[serviceHash]
+	if !ok || r == nil {
+		s.mu.Unlock()
+		return false
+	}
+	r.LastEscalatedAt = ts
+	r.EscalatedStep = step
 	s.markDirtyLocked()
 	s.mu.Unlock()
 	return true
