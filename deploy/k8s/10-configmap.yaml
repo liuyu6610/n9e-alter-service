@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: n9e-alter-service-config
+  namespace: n9e-alter-service
+data:
+  config.json: |
+    {
+      "addr": ":8080",
+      "web_dir": "/app/web/dist",
+      "data_dir": "/app/data",
+      "api_token": "",
+      "n9e": {
+        "base_url": "https://nightingale.example.com",
+        "api_path": "/api/n9e/alert-cur-events/list",
+        "user_token": "",
+        "authorization": "",
+        "timeout_seconds": 10,
+        "verify_tls": true
+      },
+      "pull": {
+        "interval_seconds": 30,
+        "page_limit": 200,
+        "max_pages": 2000,
+        "my_groups": false,
+        "hours": 0,
+        "stime": 0,
+        "etime": 0,
+        "query": "",
+        "severity": "",
+        "prods": "",
+        "rule_prods": "",
+        "cate": "",
+        "rid": 0,
+        "event_ids": ""
+      },
+      "push": {
+        "enabled": true,
+        "token": "",
+        "queue_size": 20000,
+        "worker_count": 2,
+        "enqueue_timeout_milli": 30000
+      },
+      "state": {
+        "snapshot_file": "/app/data/state.json",
+        "snapshot_interval_seconds": 30,
+        "retain_recovered_seconds": 86400,
+        "recover_miss_count": 1,
+        "redis": {
+          "enabled": false,
+          "addr": "",
+          "password": "",
+          "db": 0,
+          "key_prefix": "n9e_alter",
+          "hot_ttl_seconds": 600,
+          "ttl_seconds": 86400
+        }
+      },
+      "dingtalk": {
+        "webhook": "",
+        "secret": "",
+        "keyword": ""
+      },
+      "robots": [],
+      "bindings": [],
+      "silences": [],
+      "routes": []
+    }

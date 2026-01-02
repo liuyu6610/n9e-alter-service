@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n9e-alter-service
+  namespace: n9e-alter-service
+  labels:
+    app.kubernetes.io/name: n9e-alter-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: n9e-alter-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: n9e-alter-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: n9e-alter-service:local
+          imagePullPolicy: IfNotPresent
+          args: ["-config", "/app/config/config.json"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SERVICE_ADDR
+              value: ":8080"
+            - name: WEB_DIR
+              value: "/app/web/dist"
+            - name: DATA_DIR
+              value: "/app/data"
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: n9e-alter-service-secret
+                  key: API_TOKEN
+            - name: PUSH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: n9e-alter-service-secret
+                  key: PUSH_TOKEN
+            - name: N9E_USER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: n9e-alter-service-secret
+                  key: N9E_USER_TOKEN
+            - name: N9E_AUTHORIZATION
+              valueFrom:
+                secretKeyRef:
+                  name: n9e-alter-service-secret
+                  key: N9E_AUTHORIZATION
+            - name: STATE_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n9e-alter-service-secret
+                  key: STATE_REDIS_PASSWORD
+            - name: STATE_REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: n9e-alter-service-secret
+                  key: STATE_REDIS_ADDR
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: n9e-alter-service-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: n9e-alter-service-data
+        - name: tmp
+          emptyDir: {}
