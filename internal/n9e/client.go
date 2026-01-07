@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"log"
 	"io"
 	"net/http"
 	"net/url"
@@ -158,6 +159,11 @@ func (c *Client) FetchCurEvents(ctx context.Context, pull config.PullConfig) ([]
 			cancel()
 			return nil, 0, err
 		}
+		proxy := ""
+		if pu, perr := http.ProxyFromEnvironment(req); perr == nil && pu != nil {
+			proxy = pu.String()
+		}
+		log.Printf("n9e request url=%s x_user_token=%v authorization=%v proxy=%s", u, c.userToken != "", c.authorization != "", proxy)
 		req.Header.Set("Accept", "application/json")
 		if c.userToken != "" {
 			req.Header.Set("X-User-Token", c.userToken)
@@ -169,6 +175,7 @@ func (c *Client) FetchCurEvents(ctx context.Context, pull config.PullConfig) ([]
 		resp, err := c.hc.Do(req)
 		cancel()
 		if err != nil {
+			log.Printf("n9e request error url=%s err_type=%T err=%v", u, err, err)
 			return nil, 0, err
 		}
 		b, rerr := io.ReadAll(resp.Body)
@@ -177,6 +184,7 @@ func (c *Client) FetchCurEvents(ctx context.Context, pull config.PullConfig) ([]
 			return nil, 0, rerr
 		}
 		if resp.StatusCode >= 300 {
+			log.Printf("n9e response error url=%s status=%d body_len=%d", u, resp.StatusCode, len(b))
 			return nil, 0, fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
 		}
 
