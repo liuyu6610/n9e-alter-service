@@ -3,7 +3,7 @@
   "web_dir": "web/dist",
   "data_dir": "data",
   "n9e": {
-    "base_url": "https://nightingale.example.com",
+    "base_url": "http://host.docker.internal:17000",
     "api_path": "/api/n9e/alert-cur-events/list",
     "user_token": "",
     "authorization": "",
@@ -77,5 +77,40 @@
         "clear_mode": "reset_notified"
       }
     }
-  ]
+  ],
+  "push": {
+    "enabled": false,
+    "token": "push-token-123",
+    "queue_size": 20000,
+    "worker_count": 8,
+    "enqueue_timeout_milli": 30000
+  },
+  "robots": [
+    {
+      "id": "demo_robot",
+      "webhook": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN",
+      "secret": "",
+      "keyword": "",
+      "fallback_robot_ids": []
+    }
+  ],
+  "bindings": [
+    {
+      "name": "by_cluster_prod",
+      "priority": 10,
+      "enabled": true,
+      "robot_id": "",
+      "robot_ids": ["demo_robot"],
+      "group_id": 0,
+      "group_name_regex": "",
+      "rule_id": 0,
+      "rule_name_regex": "",
+      "route_name": "default",
+      "tags": {},
+      "tag_regex": {
+        "cluster": "^prod$"
+      }
+    }
+  ],
+  "api_token": ""
 }

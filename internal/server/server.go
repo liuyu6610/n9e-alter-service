@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +47,144 @@ type rollbackRequest struct {
 	Version string `json:"version"`
 	Message string `json:"message"`
 	Actor   string `json:"actor"`
+}
+
+func validateRuleSet(rs rulesrepo.RuleSet) error {
+	// robots
+	robotCfg := map[string]config.RobotConfig{}
+	seenRobot := map[string]struct{}{}
+	for i := range rs.Robots {
+		rb := rs.Robots[i]
+		id := strings.TrimSpace(rb.ID)
+		if id == "" {
+			return fmt.Errorf("robots[%d].id is blank", i)
+		}
+		key := strings.ToLower(id)
+		if _, ok := seenRobot[key]; ok {
+			return fmt.Errorf("robots[%d].id duplicated: %s", i, id)
+		}
+		seenRobot[key] = struct{}{}
+		rb.ID = id
+		rb.Webhook = strings.TrimSpace(rb.Webhook)
+		rb.Secret = strings.TrimSpace(rb.Secret)
+		rb.Keyword = strings.TrimSpace(rb.Keyword)
+		robotCfg[id] = rb
+	}
+
+	// routes: unique name + notify.robot_id references
+	seenRoute := map[string]struct{}{}
+	for i := range rs.Routes {
+		rc := rs.Routes[i]
+		name := strings.TrimSpace(rc.Name)
+		if name == "" {
+			name = fmt.Sprintf("route-%d", i)
+		}
+		key := strings.ToLower(name)
+		if _, ok := seenRoute[key]; ok {
+			return fmt.Errorf("routes[%d].name duplicated: %s", i, name)
+		}
+		seenRoute[key] = struct{}{}
+
+		// Validate route notify robot id references if set.
+		rid := strings.TrimSpace(rc.Notify.RobotID)
+		if rid != "" {
+			rb, ok := robotCfg[rid]
+			if !ok {
+				return fmt.Errorf("routes[%d].notify.robot_id not found: %s", i, rid)
+			}
+			if strings.TrimSpace(rb.Webhook) == "" {
+				return fmt.Errorf("routes[%d].notify.robot_id has empty webhook: %s", i, rid)
+			}
+		}
+
+		// Validate escalation robot ids
+		for j := range rc.Notify.Escalations {
+			es := rc.Notify.Escalations[j]
+			for k, eid := range es.RobotIDs {
+				eid = strings.TrimSpace(eid)
+				if eid == "" {
+					continue
+				}
+				rb, ok := robotCfg[eid]
+				if !ok {
+					return fmt.Errorf("routes[%d].notify.escalations[%d].robot_ids[%d] not found: %s", i, j, k, eid)
+				}
+				if strings.TrimSpace(rb.Webhook) == "" {
+					return fmt.Errorf("routes[%d].notify.escalations[%d].robot_ids[%d] has empty webhook: %s", i, j, k, eid)
+				}
+			}
+		}
+	}
+
+	// bindings
+	seenBinding := map[string]struct{}{}
+	for i := range rs.Bindings {
+		br := rs.Bindings[i]
+		name := strings.TrimSpace(br.Name)
+		if name == "" {
+			return fmt.Errorf("bindings[%d].name is blank", i)
+		}
+		key := strings.ToLower(name)
+		if _, ok := seenBinding[key]; ok {
+			return fmt.Errorf("bindings[%d].name duplicated: %s", i, name)
+		}
+		seenBinding[key] = struct{}{}
+
+		if !br.Enabled {
+			continue
+		}
+
+		// validate binding regexes (reject invalid early; runtime currently silently drops invalid ones)
+		if v := strings.TrimSpace(br.GroupNameRegex); v != "" {
+			if _, err := regexp.Compile(v); err != nil {
+				return fmt.Errorf("bindings[%d].group_name_regex invalid: %v", i, err)
+			}
+		}
+		if v := strings.TrimSpace(br.RuleNameRegex); v != "" {
+			if _, err := regexp.Compile(v); err != nil {
+				return fmt.Errorf("bindings[%d].rule_name_regex invalid: %v", i, err)
+			}
+		}
+		for k, pat := range br.TagRegex {
+			kk := strings.TrimSpace(k)
+			pp := strings.TrimSpace(pat)
+			if kk == "" {
+				return fmt.Errorf("bindings[%d].tag_regex has empty key", i)
+			}
+			if pp == "" {
+				return fmt.Errorf("bindings[%d].tag_regex[%s] is blank", i, kk)
+			}
+			if _, err := regexp.Compile(pp); err != nil {
+				return fmt.Errorf("bindings[%d].tag_regex[%s] invalid: %v", i, kk, err)
+			}
+		}
+
+		// validate referenced robot IDs
+		ids := make([]string, 0, len(br.RobotIDs)+1)
+		for _, rid := range br.RobotIDs {
+			rid = strings.TrimSpace(rid)
+			if rid != "" {
+				ids = append(ids, rid)
+			}
+		}
+		if v := strings.TrimSpace(br.RobotID); v != "" {
+			ids = append(ids, v)
+		}
+		if len(ids) == 0 {
+			return fmt.Errorf("bindings[%d] enabled but robot_id/robot_ids is empty", i)
+		}
+		for j, rid := range ids {
+			rb, ok := robotCfg[rid]
+			if !ok {
+				return fmt.Errorf("bindings[%d] robot ref not found at index %d: %s", i, j, rid)
+			}
+			if strings.TrimSpace(rb.Webhook) == "" {
+				return fmt.Errorf("bindings[%d] robot ref has empty webhook at index %d: %s", i, j, rid)
+			}
+		}
+	}
+
+	return nil
 }
 
 type rulesVersionGetResponse struct {
@@ -699,6 +839,10 @@ func (s *Server) handleRulesPublish(w http.ResponseWriter, r *http.Request) {
 	var req publishRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if err := validateRuleSet(req.RuleSet); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	ver, hash, err := s.repo.Publish(req.RuleSet, req.Message, req.Actor)

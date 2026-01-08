@@ -11,6 +11,27 @@
       />
     </el-col>
 
+    <el-col :span="24" style="margin-top: 12px">
+      <el-card shadow="never">
+        <template #header>
+          <div style="display: flex; justify-content: space-between; align-items: center">
+            <div>API Token</div>
+            <el-tag :type="apiTokenMasked ? 'success' : 'info'">{{ apiTokenMasked ? `已设置(${apiTokenMasked})` : '未设置' }}</el-tag>
+          </div>
+        </template>
+
+        <el-form label-width="110px">
+          <el-form-item label="api_token">
+            <el-input v-model="apiTokenInput" type="password" show-password placeholder="用于访问 /api/v1/*（Bearer）" />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" @click="saveApiToken">保存到浏览器</el-button>
+            <el-button @click="clearApiToken">清除</el-button>
+          </el-form-item>
+        </el-form>
+      </el-card>
+    </el-col>
+
     <el-col :span="8" style="margin-top: 12px">
       <el-card>
         <template #header>
@@ -336,6 +357,120 @@
               </div>
             </el-tab-pane>
 
+            <el-tab-pane label="Robots" name="robots">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px">
+                <div style="font-weight: 600">钉钉机器人（多群多 token）</div>
+                <el-button size="small" @click="addRobot">新增机器人</el-button>
+              </div>
+
+              <el-table :data="formModel.robots" size="small" border style="width: 100%" row-key="id">
+                <el-table-column label="#" width="48">
+                  <template #default="scope"><span>{{ scope.$index + 1 }}</span></template>
+                </el-table-column>
+                <el-table-column label="id" min-width="160">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.id" placeholder="robot id（唯一）" @blur="onRobotIDBlur(scope.$index)" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="webhook" min-width="260">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.webhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+                  </template>
+                </el-table-column>
+                <el-table-column label="secret" min-width="180">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.secret" type="password" show-password placeholder="可选" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="keyword" min-width="140">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.keyword" placeholder="可选" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="fallback_robot_ids" min-width="220">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.__fallbackText" placeholder="逗号分隔，例如: r1,r2" @blur="onRobotFallbackBlur(scope.$index)" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="op" width="80">
+                  <template #default="scope">
+                    <el-button size="small" type="danger" @click="removeRobot(scope.$index)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <div style="margin-top: 8px; color: #909399; font-size: 12px">
+                说明：Bindings 命中后会优先按绑定选择 robot_ids；否则使用 route.notify.robot_id；否则使用全局/route 的 dingtalk。
+              </div>
+            </el-tab-pane>
+
+            <el-tab-pane label="Bindings" name="bindings">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px">
+                <div style="font-weight: 600">绑定规则（把不同告警/群发送到不同机器人）</div>
+                <el-button size="small" @click="addBinding">新增绑定</el-button>
+              </div>
+
+              <el-table :data="formModel.bindings" size="small" border style="width: 100%" row-key="name">
+                <el-table-column label="#" width="48">
+                  <template #default="scope"><span>{{ scope.$index + 1 }}</span></template>
+                </el-table-column>
+                <el-table-column label="enabled" width="90">
+                  <template #default="scope"><el-switch v-model="scope.row.enabled" /></template>
+                </el-table-column>
+                <el-table-column label="name" min-width="160">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.name" placeholder="唯一标识" @blur="onBindingNameBlur(scope.$index)" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="priority" width="120">
+                  <template #default="scope"><el-input-number v-model="scope.row.priority" :step="1" /></template>
+                </el-table-column>
+                <el-table-column label="route_name" min-width="140">
+                  <template #default="scope"><el-input v-model="scope.row.route_name" placeholder="留空=所有路由" /></template>
+                </el-table-column>
+                <el-table-column label="group_id" width="120">
+                  <template #default="scope"><el-input-number v-model="scope.row.group_id" :min="0" :step="1" style="width: 100%" /></template>
+                </el-table-column>
+                <el-table-column label="group_name_regex" min-width="160">
+                  <template #default="scope"><el-input v-model="scope.row.group_name_regex" placeholder="可选" /></template>
+                </el-table-column>
+                <el-table-column label="rule_id" width="120">
+                  <template #default="scope"><el-input-number v-model="scope.row.rule_id" :min="0" :step="1" style="width: 100%" /></template>
+                </el-table-column>
+                <el-table-column label="rule_name_regex" min-width="160">
+                  <template #default="scope"><el-input v-model="scope.row.rule_name_regex" placeholder="可选" /></template>
+                </el-table-column>
+                <el-table-column label="robot_ids" min-width="200">
+                  <template #default="scope">
+                    <el-input v-model="scope.row.__robotIDsText" placeholder="逗号分隔，例如: r1,r2" @blur="onBindingRobotIDsBlur(scope.$index)" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="tags" width="120">
+                  <template #default="scope">
+                    <div style="display: flex; gap: 8px; align-items: center">
+                      <el-tag type="info">{{ Object.keys(scope.row.tags || {}).length }}</el-tag>
+                      <el-button size="small" @click="openBindingTagEditor(scope.$index, 'tags')">编辑</el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="tag_regex" width="140">
+                  <template #default="scope">
+                    <div style="display: flex; gap: 8px; align-items: center">
+                      <el-tag type="info">{{ Object.keys(scope.row.tag_regex || {}).length }}</el-tag>
+                      <el-button size="small" @click="openBindingTagEditor(scope.$index, 'tag_regex')">编辑</el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="op" width="80">
+                  <template #default="scope"><el-button size="small" type="danger" @click="removeBinding(scope.$index)">删除</el-button></template>
+                </el-table-column>
+              </el-table>
+
+              <div style="margin-top: 8px; color: #909399; font-size: 12px">
+                提示：priority 越大越优先；绑定命中后会取 robot_ids（或 robot_id）并去重发送。
+              </div>
+            </el-tab-pane>
+
             <el-tab-pane label="Silences" name="silences">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px">
                 <div style="font-weight: 600">抑制规则</div>
@@ -427,6 +562,36 @@
           </el-tabs>
         </el-form>
 
+        <el-dialog v-model="bindingTagEditor.open" :title="bindingTagEditor.title" width="860px">
+          <el-alert v-if="bindingTagEditor.err" type="error" :closable="false" show-icon :title="bindingTagEditor.err" style="margin-bottom: 10px" />
+          <el-form label-width="120px">
+            <el-form-item label="快速添加">
+              <div style="display: flex; gap: 8px; width: 100%">
+                <el-input v-model="bindingTagEditor.quickKey" placeholder="key" style="width: 220px" />
+                <el-input v-model="bindingTagEditor.quickVal" placeholder="value / regex" style="flex: 1" />
+                <el-button type="primary" @click="bindingTagEditorQuickAdd">添加/覆盖</el-button>
+              </div>
+            </el-form-item>
+            <el-form-item label="批量编辑(JSON)">
+              <el-input v-model="bindingTagEditor.json" type="textarea" :autosize="{ minRows: 12, maxRows: 24 }" placeholder='{"cluster":"prod","app":"api"}' />
+            </el-form-item>
+          </el-form>
+
+          <template #footer>
+            <div style="display: flex; justify-content: space-between; width: 100%">
+              <div style="display: flex; gap: 8px">
+                <el-button @click="bindingTagEditorValidate">校验</el-button>
+                <el-button @click="bindingTagEditorFormat">格式化</el-button>
+                <el-button type="warning" @click="bindingTagEditorClear">清空</el-button>
+              </div>
+              <div style="display: flex; gap: 8px">
+                <el-button @click="bindingTagEditor.open = false">取消</el-button>
+                <el-button type="primary" @click="bindingTagEditorSave">保存</el-button>
+              </div>
+            </div>
+          </template>
+        </el-dialog>
+
         <el-collapse style="margin-top: 12px">
           <el-collapse-item name="json" title="高级：RuleSet JSON（导入/导出）">
             <el-input
@@ -456,6 +621,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 
 import { getRulesCurrent, getRulesVersion, listRulesAudits, listRulesVersions, publishRules, rollbackRules } from '../api/client'
 import type { AuditRecord, RuleSet } from '../api/types'
@@ -532,6 +698,24 @@ function sanitizeRuleSetForOutput(rs: RuleSet): RuleSet {
     })
   }
 
+  if (Array.isArray(out.robots)) {
+    out.robots = out.robots.map((r: any) => {
+      const x = { ...r }
+      delete x.__fallbackText
+      return x
+    })
+  }
+
+  if (Array.isArray(out.bindings)) {
+    out.bindings = out.bindings.map((b: any) => {
+      const x = { ...b }
+      delete x.__robotIDsText
+      delete x.__tagsJson
+      delete x.__tagRegexJson
+      return x
+    })
+  }
+
   return out as RuleSet
 }
 
@@ -583,7 +767,7 @@ function defaultRuleSet(): RuleSet {
         ttl_seconds: 0,
       },
     },
-	  silences: [],
+    silences: [],
     routes: [],
     robots: [],
     bindings: [],
@@ -611,6 +795,57 @@ const activeTab = ref('n9e')
 const formModel = ref(null as unknown as RuleSet | null)
 const formRef = ref(null as unknown as FormInstance | null)
 const formReady = ref(false)
+
+const apiTokenInput = ref('')
+const apiTokenMasked = ref('')
+
+function maskToken(v: string) {
+  const s = String(v || '').trim()
+  if (!s) return ''
+  if (s.length <= 6) return '***'
+  return `${s.slice(0, 2)}***${s.slice(-2)}`
+}
+
+function loadApiToken() {
+  try {
+    const v = (typeof window !== 'undefined' ? window.localStorage.getItem('api_token') : '') || ''
+    apiTokenInput.value = v
+    apiTokenMasked.value = maskToken(v)
+  } catch {
+    apiTokenInput.value = ''
+    apiTokenMasked.value = ''
+  }
+}
+
+function saveApiToken() {
+  try {
+    const v = (apiTokenInput.value || '').trim()
+    if (typeof window !== 'undefined') {
+      if (v) {
+        window.localStorage.setItem('api_token', v)
+      } else {
+        window.localStorage.removeItem('api_token')
+      }
+    }
+    apiTokenMasked.value = maskToken(v)
+    ElMessage.success('api_token 已保存')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  }
+}
+
+function clearApiToken() {
+  apiTokenInput.value = ''
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem('api_token')
+    }
+  } catch {
+    // ignore
+  }
+  apiTokenMasked.value = ''
+  ElMessage.success('已清除 api_token')
+}
 
 const rules = {
   'n9e.timeout_seconds': [{ type: 'number', min: 0, message: 'timeout_seconds 需 >= 0', trigger: 'change' }],
@@ -699,6 +934,36 @@ function setRuleSet(rs: RuleSet) {
     })
   }
 
+  if (!Array.isArray((model as any).robots)) {
+    ;(model as any).robots = []
+  }
+  ;(model as any).robots = ((model as any).robots || []).map((r: any) => {
+    const nr = deepClone(r || {})
+    if (!Array.isArray(nr.fallback_robot_ids)) {
+      nr.fallback_robot_ids = []
+    }
+    nr.__fallbackText = (nr.fallback_robot_ids || []).join(',')
+    return nr
+  })
+
+  if (!Array.isArray((model as any).bindings)) {
+    ;(model as any).bindings = []
+  }
+  ;(model as any).bindings = ((model as any).bindings || []).map((b: any) => {
+    const nb = deepClone(b || {})
+    if (!Array.isArray(nb.robot_ids)) {
+      nb.robot_ids = []
+    }
+    nb.__robotIDsText = (nb.robot_ids || []).join(',')
+    const tags = nb?.tags && typeof nb.tags === 'object' ? nb.tags : {}
+    const tagRegex = nb?.tag_regex && typeof nb.tag_regex === 'object' ? nb.tag_regex : {}
+    nb.tags = tags
+    nb.tag_regex = tagRegex
+    nb.__tagsJson = JSON.stringify(tags || {}, null, 0)
+    nb.__tagRegexJson = JSON.stringify(tagRegex || {}, null, 0)
+    return nb
+  })
+
   formModel.value = model
   formReady.value = true
   rulesJson.value = JSON.stringify(sanitizeRuleSetForOutput(model), null, 2)
@@ -760,6 +1025,17 @@ const selectedVersion = ref('')
 const auditsLoading = ref(false)
 const audits = ref([] as AuditRecord[])
 const rolling = ref(false)
+
+const bindingTagEditor = ref({
+  open: false,
+  idx: -1,
+  field: 'tags' as 'tags' | 'tag_regex',
+  title: 'Tags Editor',
+  json: '',
+  quickKey: '',
+  quickVal: '',
+  err: '',
+})
 
 async function reload() {
   loading.value = true
@@ -842,6 +1118,8 @@ async function publish() {
       throw new Error('表单未就绪')
     }
     validateRoutesUniqueOrThrow()
+    validateRobotsUniqueOrThrow()
+    validateBindingsUniqueOrThrow()
     if (formRef.value && typeof formRef.value.validate === 'function') {
       await formRef.value.validate()
     }
@@ -857,12 +1135,53 @@ async function publish() {
 }
 
 onMounted(() => {
+  loadApiToken()
   formModel.value = defaultRuleSet()
   formReady.value = true
   rulesJson.value = JSON.stringify(formModel.value, null, 2)
   reload()
   loadVersions()
   loadAudits()
+
+  // Import binding draft generated from Preview
+  try {
+    const key = 'n9e_alter_binding_draft'
+    const s = typeof window !== 'undefined' ? window.localStorage.getItem(key) : ''
+    if (s) {
+      const draft = JSON.parse(s)
+      window.localStorage.removeItem(key)
+      if (draft && typeof draft === 'object') {
+        const cur = (formModel.value as any)
+        if (cur) {
+          if (!Array.isArray(cur.bindings)) {
+            cur.bindings = []
+          }
+          // normalize helper fields
+          if (!Array.isArray(draft.robot_ids)) {
+            draft.robot_ids = []
+          }
+          draft.__robotIDsText = (draft.robot_ids || []).join(',')
+          const tags = draft?.tags && typeof draft.tags === 'object' ? draft.tags : {}
+          const tagRegex = draft?.tag_regex && typeof draft.tag_regex === 'object' ? draft.tag_regex : {}
+          draft.tags = tags
+          draft.tag_regex = tagRegex
+          draft.__tagsJson = JSON.stringify(tags || {}, null, 0)
+          draft.__tagRegexJson = JSON.stringify(tagRegex || {}, null, 0)
+          cur.bindings = [...cur.bindings, draft]
+          activeTab.value = 'bindings'
+          // open editor for tag_regex if present, else tags
+          const idx = cur.bindings.length - 1
+          if (Object.keys(tagRegex || {}).length > 0) {
+            openBindingTagEditor(idx, 'tag_regex')
+          } else {
+            openBindingTagEditor(idx, 'tags')
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
 })
 
 function addRoute() {
@@ -917,6 +1236,265 @@ function addRoute() {
   ;(formModel.value as any).routes = [...((formModel.value as any).routes || []), r]
 }
 
+function addRobot() {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).robots || []
+  const now = Date.now()
+  const r: any = {
+    id: `robot_${now}`,
+    webhook: '',
+    secret: '',
+    keyword: '',
+    fallback_robot_ids: [],
+    __fallbackText: '',
+  }
+  ;(formModel.value as any).robots = [...items, r]
+  try {
+    validateRobotsUniqueOrThrow()
+  } catch {
+    // ignore
+  }
+}
+
+function removeRobot(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).robots || []
+  ;(formModel.value as any).robots = items.filter((_: any, i: number) => i !== idx)
+}
+
+function onRobotIDBlur(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).robots || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  items[idx].id = String(items[idx].id || '').trim()
+  try {
+    validateRobotsUniqueOrThrow()
+  } catch (e: any) {
+    error.value = e?.message || String(e)
+  }
+}
+
+function onRobotFallbackBlur(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).robots || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  try {
+    items[idx].fallback_robot_ids = safeParseStringArray(items[idx].__fallbackText || '')
+    items[idx].__fallbackText = (items[idx].fallback_robot_ids || []).join(',')
+  } catch (e: any) {
+    error.value = `robots[${idx}].fallback_robot_ids: ${e?.message || String(e)}`
+  }
+}
+
+function addBinding() {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  const now = Date.now()
+  const b: any = {
+    name: `binding_${now}`,
+    priority: 0,
+    enabled: true,
+    robot_id: '',
+    robot_ids: [],
+    group_id: 0,
+    group_name_regex: '',
+    rule_id: 0,
+    rule_name_regex: '',
+    route_name: '',
+    tags: {},
+    tag_regex: {},
+    __robotIDsText: '',
+    __tagsJson: '{}',
+    __tagRegexJson: '{}',
+  }
+  ;(formModel.value as any).bindings = [...items, b]
+  try {
+    validateBindingsUniqueOrThrow()
+  } catch {
+    // ignore
+  }
+}
+
+function removeBinding(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  ;(formModel.value as any).bindings = items.filter((_: any, i: number) => i !== idx)
+}
+
+function onBindingNameBlur(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  items[idx].name = String(items[idx].name || '').trim()
+  try {
+    validateBindingsUniqueOrThrow()
+  } catch (e: any) {
+    error.value = e?.message || String(e)
+  }
+}
+
+function onBindingRobotIDsBlur(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  try {
+    items[idx].robot_ids = safeParseStringArray(items[idx].__robotIDsText || '')
+    items[idx].__robotIDsText = (items[idx].robot_ids || []).join(',')
+  } catch (e: any) {
+    error.value = `bindings[${idx}].robot_ids: ${e?.message || String(e)}`
+  }
+}
+
+function onBindingTagsBlur(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  try {
+    items[idx].tags = safeParseObject(items[idx].__tagsJson || '')
+    items[idx].__tagsJson = JSON.stringify(items[idx].tags || {}, null, 0)
+  } catch (e: any) {
+    error.value = `bindings[${idx}].tags: ${e?.message || String(e)}`
+  }
+}
+
+function onBindingTagRegexBlur(idx: number) {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  try {
+    items[idx].tag_regex = safeParseObject(items[idx].__tagRegexJson || '')
+    items[idx].__tagRegexJson = JSON.stringify(items[idx].tag_regex || {}, null, 0)
+  } catch (e: any) {
+    error.value = `bindings[${idx}].tag_regex: ${e?.message || String(e)}`
+  }
+}
+
+function openBindingTagEditor(idx: number, field: 'tags' | 'tag_regex') {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  if (idx < 0 || idx >= items.length) {
+    return
+  }
+  const it = items[idx] || {}
+  const obj = field === 'tags' ? (it.tags || {}) : (it.tag_regex || {})
+  bindingTagEditor.value.open = true
+  bindingTagEditor.value.idx = idx
+  bindingTagEditor.value.field = field
+  bindingTagEditor.value.title = field === 'tags' ? '编辑 tags（精确匹配）' : '编辑 tag_regex（正则匹配）'
+  bindingTagEditor.value.json = JSON.stringify(obj || {}, null, 2)
+  bindingTagEditor.value.quickKey = ''
+  bindingTagEditor.value.quickVal = ''
+  bindingTagEditor.value.err = ''
+}
+
+function bindingTagEditorValidate() {
+  bindingTagEditor.value.err = ''
+  try {
+    safeParseObject(bindingTagEditor.value.json || '')
+    ElMessage.success('JSON 校验通过')
+  } catch (e: any) {
+    bindingTagEditor.value.err = e?.message || String(e)
+  }
+}
+
+function bindingTagEditorFormat() {
+  bindingTagEditor.value.err = ''
+  try {
+    const obj = safeParseObject(bindingTagEditor.value.json || '')
+    bindingTagEditor.value.json = JSON.stringify(obj, null, 2)
+  } catch (e: any) {
+    bindingTagEditor.value.err = e?.message || String(e)
+  }
+}
+
+function bindingTagEditorClear() {
+  bindingTagEditor.value.err = ''
+  bindingTagEditor.value.json = '{}'
+  bindingTagEditor.value.quickKey = ''
+  bindingTagEditor.value.quickVal = ''
+}
+
+function bindingTagEditorQuickAdd() {
+  bindingTagEditor.value.err = ''
+  const k = String(bindingTagEditor.value.quickKey || '').trim()
+  const v = String(bindingTagEditor.value.quickVal || '').trim()
+  if (!k) {
+    bindingTagEditor.value.err = 'key 不能为空'
+    return
+  }
+  try {
+    const obj = safeParseObject(bindingTagEditor.value.json || '')
+    obj[k] = v
+    bindingTagEditor.value.json = JSON.stringify(obj, null, 2)
+    bindingTagEditor.value.quickKey = ''
+    bindingTagEditor.value.quickVal = ''
+  } catch (e: any) {
+    bindingTagEditor.value.err = e?.message || String(e)
+  }
+}
+
+function bindingTagEditorSave() {
+  if (!formModel.value) {
+    return
+  }
+  const idx = bindingTagEditor.value.idx
+  const field = bindingTagEditor.value.field
+  const items = (formModel.value as any).bindings || []
+  if (idx < 0 || idx >= items.length) {
+    bindingTagEditor.value.err = 'binding index invalid'
+    return
+  }
+  bindingTagEditor.value.err = ''
+  try {
+    const obj = safeParseObject(bindingTagEditor.value.json || '')
+    if (field === 'tags') {
+      items[idx].tags = obj
+      items[idx].__tagsJson = JSON.stringify(obj || {}, null, 0)
+    } else {
+      items[idx].tag_regex = obj
+      items[idx].__tagRegexJson = JSON.stringify(obj || {}, null, 0)
+    }
+    bindingTagEditor.value.open = false
+    ElMessage.success('已保存')
+  } catch (e: any) {
+    bindingTagEditor.value.err = e?.message || String(e)
+  }
+}
+
 function removeRoute(idx: number) {
   if (!formModel.value) {
     return
@@ -964,6 +1542,44 @@ function validateRoutesUniqueOrThrow() {
     const prev = seen.get(name)
     if (prev != null) {
       throw new Error(`routes name 重复: '${name}' (index=${prev},${i})`)
+    }
+    seen.set(name, i)
+  }
+}
+
+function validateRobotsUniqueOrThrow() {
+  if (!formModel.value) {
+    return
+  }
+  const robots = (formModel.value as any).robots || []
+  const seen = new Map<string, number>()
+  for (let i = 0; i < robots.length; i++) {
+    const id = String(robots[i]?.id || '').trim()
+    if (!id) {
+      continue
+    }
+    const prev = seen.get(id)
+    if (prev != null) {
+      throw new Error(`robots id 重复: '${id}' (index=${prev},${i})`)
+    }
+    seen.set(id, i)
+  }
+}
+
+function validateBindingsUniqueOrThrow() {
+  if (!formModel.value) {
+    return
+  }
+  const items = (formModel.value as any).bindings || []
+  const seen = new Map<string, number>()
+  for (let i = 0; i < items.length; i++) {
+    const name = String(items[i]?.name || '').trim()
+    if (!name) {
+      continue
+    }
+    const prev = seen.get(name)
+    if (prev != null) {
+      throw new Error(`bindings name 重复: '${name}' (index=${prev},${i})`)
     }
     seen.set(name, i)
   }

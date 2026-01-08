@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM node:20-alpine AS web-builder
 WORKDIR /src
 COPY web/package.json web/package-lock.json web/tsconfig.json web/vite.config.ts ./web/
