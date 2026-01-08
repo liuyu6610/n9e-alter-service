@@ -625,10 +625,12 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	snap := s.rt.Get()
 	st := snap.Eng.Status()
+	pd := snap.Eng.PullDebug()
 	active, recovered, total := s.st.Summary()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"time":   time.Now().UTC().Format(time.RFC3339),
 		"engine": st,
+		"pull_debug": pd,
 		"state": map[string]any{
 			"active":    active,
 			"recovered": recovered,

@@ -26,11 +26,23 @@ type Status struct {
 	LastFetched     int    `json:"last_fetched"`
 	LastTotal       int    `json:"last_total"`
 	LastInputs      int    `json:"last_inputs"`
+	LastMatched     int    `json:"last_matched"`
+	LastDropped     int    `json:"last_dropped"`
+	LastUnmatched   int    `json:"last_unmatched"`
 	ActiveTotal     int    `json:"active_total"`
 	RecoveredTotal  int    `json:"recovered_total"`
 	NewActives      int    `json:"new_actives"`
 	NewRecovereds   int    `json:"new_recovereds"`
 	PurgedRecovered int    `json:"purged_recovered"`
+}
+
+type PullDebug struct {
+	Fetched   int            `json:"fetched"`
+	Total     int            `json:"total"`
+	Matched   int            `json:"matched"`
+	Dropped   int            `json:"dropped"`
+	Unmatched int            `json:"unmatched"`
+	Routes    map[string]int `json:"routes"`
 }
 
 type Engine struct {
@@ -44,6 +56,9 @@ type Engine struct {
 
 	statusMu sync.RWMutex
 	status   Status
+
+	pullDbgMu sync.RWMutex
+	pullDbg   PullDebug
 }
 
 type compiledRoute struct {
@@ -158,8 +173,28 @@ func (e *Engine) Status() Status {
 	return st
 }
 
+func (e *Engine) PullDebug() PullDebug {
+	e.pullDbgMu.RLock()
+	d := e.pullDbg
+	e.pullDbgMu.RUnlock()
+	if d.Routes == nil {
+		return d
+	}
+	out := make(map[string]int, len(d.Routes))
+	for k, v := range d.Routes {
+		out[k] = v
+	}
+	d.Routes = out
+	return d
+}
+
 func (e *Engine) BuildInputEvents(evs []n9e.CurEvent) []state.InputEvent {
 	return e.buildInputs(evs)
+}
+
+func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
+	items, _ := e.buildInputsWithStats(evs)
+	return items
 }
 
 type PreviewItem struct {
@@ -247,10 +282,14 @@ func (e *Engine) RunOnce(ctx context.Context) (state.ApplyResult, error) {
 		s.LastFetched = 0
 		s.LastTotal = 0
 		s.LastInputs = 0
+		s.LastMatched = 0
+		s.LastDropped = 0
+		s.LastUnmatched = 0
 		s.NewActives = 0
 		s.NewRecovereds = 0
 		s.PurgedRecovered = 0
 	})
+	e.setPullDebug(PullDebug{})
 
 	evs, total, err := e.n9e.FetchCurEvents(ctx, e.cfg.Pull)
 	if err != nil {
@@ -261,7 +300,7 @@ func (e *Engine) RunOnce(ctx context.Context) (state.ApplyResult, error) {
 		return state.ApplyResult{}, err
 	}
 
-	inputs := e.buildInputs(evs)
+	inputs, st2 := e.buildInputsWithStats(evs)
 
 	res := e.st.ApplyPull(time.Now(), inputs, state.ApplyOptions{
 		RecoverMissCount:       e.cfg.State.RecoverMissCount,
@@ -276,11 +315,22 @@ func (e *Engine) RunOnce(ctx context.Context) (state.ApplyResult, error) {
 		s.LastFetched = len(evs)
 		s.LastTotal = total
 		s.LastInputs = len(inputs)
+		s.LastMatched = st2.Matched
+		s.LastDropped = st2.Dropped
+		s.LastUnmatched = st2.Unmatched
 		s.ActiveTotal = active
 		s.RecoveredTotal = recovered
 		s.NewActives = len(res.NewActives)
 		s.NewRecovereds = len(res.NewRecovereds)
 		s.PurgedRecovered = res.PurgedRecovered
+	})
+	e.setPullDebug(PullDebug{
+		Fetched:   len(evs),
+		Total:     total,
+		Matched:   st2.Matched,
+		Dropped:   st2.Dropped,
+		Unmatched: st2.Unmatched,
+		Routes:    st2.Routes,
 	})
 
 	log.Printf("pull done fetched=%d total=%d inputs=%d active=%d recovered=%d new_active=%d new_recovered=%d", len(evs), total, len(inputs), active, recovered, len(res.NewActives), len(res.NewRecovereds))
@@ -293,8 +343,32 @@ func (e *Engine) setStatus(fn func(s *Status)) {
 	e.statusMu.Unlock()
 }
 
-func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
+func (e *Engine) setPullDebug(d PullDebug) {
+	e.pullDbgMu.Lock()
+	if d.Routes == nil {
+		e.pullDbg = d
+		e.pullDbgMu.Unlock()
+		return
+	}
+	out := make(map[string]int, len(d.Routes))
+	for k, v := range d.Routes {
+		out[k] = v
+	}
+	d.Routes = out
+	e.pullDbg = d
+	e.pullDbgMu.Unlock()
+}
+
+type buildStats struct {
+	Matched   int
+	Dropped   int
+	Unmatched int
+	Routes    map[string]int
+}
+
+func (e *Engine) buildInputsWithStats(evs []n9e.CurEvent) ([]state.InputEvent, buildStats) {
 	aggr := make(map[string]*state.InputEvent, len(evs))
+	st := buildStats{Routes: map[string]int{}}
 
 	for _, ev := range evs {
 		groupName := strings.TrimSpace(ev.GroupName)
@@ -303,14 +377,18 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 
 		rt := e.matchRoute(groupName, ruleName, sev)
 		if rt == nil {
+			st.Unmatched++
 			continue
 		}
+		st.Matched++
 
 		tags := tagsToMap(ev)
 		groupName, ruleName, tags, dropped := applyProcessors(rt.processors, ev, groupName, ruleName, tags)
 		if dropped {
+			st.Dropped++
 			continue
 		}
+		st.Routes[rt.name]++
 
 		tags = applyTagRewrites(rt.rewrites, tags)
 		entityKey, entityDisp := pickEntity(ev, tags, rt.cfg.Dedup.NormalizePodName)
@@ -320,12 +398,6 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 		ruleName2 := applyRewrites(rt.rewrites, "rule_name", ruleName)
 		entityKey2 := applyRewrites(rt.rewrites, "entity", entityKey)
 		entityDisp2 := applyRewrites(rt.rewrites, "entity", entityDisp)
-
-		firstTs := normalizeTs(ev.FirstTriggerTime)
-		lastTs := normalizeTs(ev.TriggerTime)
-		if firstTs == 0 {
-			firstTs = lastTs
-		}
 
 		dedupKey := buildDedupKey(rt.cfg.Dedup, ev, groupName2, ruleName2, sev, entityKey2)
 		serviceHash := hashKey(rt.name + "|" + dedupKey)
@@ -345,19 +417,19 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 				Severity:         sev,
 				Entity:           entityDisp2,
 				Tags:             tags,
-				FirstTriggerTime: firstTs,
-				LastTriggerTime:  lastTs,
+				FirstTriggerTime: normalizeTs(ev.FirstTriggerTime),
+				LastTriggerTime:  normalizeTs(ev.TriggerTime),
 				RawCount:         1,
 			}
 			continue
 		}
 
 		it.RawCount++
-		if it.FirstTriggerTime == 0 || (firstTs > 0 && firstTs < it.FirstTriggerTime) {
-			it.FirstTriggerTime = firstTs
+		if it.FirstTriggerTime == 0 || (normalizeTs(ev.FirstTriggerTime) > 0 && normalizeTs(ev.FirstTriggerTime) < it.FirstTriggerTime) {
+			it.FirstTriggerTime = normalizeTs(ev.FirstTriggerTime)
 		}
-		if lastTs > it.LastTriggerTime {
-			it.LastTriggerTime = lastTs
+		if normalizeTs(ev.TriggerTime) > it.LastTriggerTime {
+			it.LastTriggerTime = normalizeTs(ev.TriggerTime)
 		}
 	}
 
@@ -368,7 +440,7 @@ func (e *Engine) buildInputs(evs []n9e.CurEvent) []state.InputEvent {
 		}
 		out = append(out, *v)
 	}
-	return out
+	return out, st
 }
 
 func (e *Engine) matchRoute(groupName, ruleName string, severity int) *compiledRoute {
