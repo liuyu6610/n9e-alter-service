@@ -130,7 +130,7 @@ go run . -config config.json
 
 说明：
 
-- `POST /api/v1/events/ingest` 的鉴权由 `push.token` 控制（见 `config.local.json`）；该 endpoint 不受全局 `api_token` 影响，便于本地联调。
+- `POST /api/v1/events/ingest` 使用 `push.token` 鉴权（见 `config.local.json`）。`push.token` 为空时拒绝请求，不会公开开放。
 - 你也可以在 Web UI 的 Settings 页面修改 routes/silences 并发布，以验证热更新与回滚。
 
 ### 常用 API
@@ -153,7 +153,7 @@ go run . -config config.json
 - `addr`：监听地址（默认 `:8080`）
 - `web_dir`：前端静态文件目录（默认 `web/dist`，容器内推荐 `/app/web/dist`）
 - `data_dir`：数据目录（规则版本库、快照等）（容器内推荐 `/app/data`）
-- `api_token`：API 鉴权 token（对 `/api/*` 生效；`/api/v1/events/ingest` 豁免，避免与 push.token 冲突）
+- `api_token`：API 鉴权 token（对 `/api/*` 生效；空值不会关闭鉴权，未配置时 `/api/*` 返回 401。ingest 使用 `push.token`）
 
 ### N9E 拉取相关（n9e / pull）
 
@@ -230,13 +230,13 @@ routes 是核心配置，每条 route 包含：
 
 ### 鉴权
 
-- 全局：当 `api_token` 非空时，`/api/*` 需要 token（`X-Token` 或 `Authorization: Bearer`）
-- 例外：`POST /api/v1/events/ingest` **不走 api_token**，只校验 `push.token`（避免双 token 冲突，便于联调与接入）
+- 全局：`/api/*` 需要非空的 `api_token`（`X-Token` 或 `Authorization: Bearer`）。`api_token` 为空时返回 401，而不是关闭鉴权。
+- `POST /api/v1/events/ingest` 使用独立的 `push.token`（同样不允许空 token 公开访问）。`/healthz`、`/readyz` 与静态资源不鉴权。
 
 ### 规则版本库 API（核心）
 
 - `GET /api/v1/rules/current`：当前生效规则（敏感字段会脱敏）
-- `POST /api/v1/rules/publish`：发布一份新规则（原子写入 + 生成 version/hash + audit）
+- `POST /api/v1/rules/publish`：发布一份新规则（原子写入 + 生成 version/hash + audit）。请求体里若仍是 GET 脱敏占位符，会保留当前真实密钥，不会写回 `current.json`。
 - `POST /api/v1/rules/rollback`：回滚到历史 version（会写 audit）
 - `GET /api/v1/rules/versions`：版本列表
 - `GET /api/v1/rules/version?version=...`：获取某个版本
