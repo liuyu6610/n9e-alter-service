@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -410,6 +411,29 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 	})
 }
 
+func requestAuthToken(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	got := strings.TrimSpace(r.Header.Get("X-Token"))
+	if got != "" {
+		return got
+	}
+	got = strings.TrimSpace(r.Header.Get("Authorization"))
+	got = strings.TrimPrefix(got, "Bearer ")
+	got = strings.TrimPrefix(got, "bearer ")
+	return strings.TrimSpace(got)
+}
+
+func tokenMatches(got, want string) bool {
+	got = strings.TrimSpace(got)
+	want = strings.TrimSpace(want)
+	if want == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r == nil {
@@ -417,10 +441,6 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 		p := r.URL.Path
-		if p == "/api/v1/events/ingest" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if strings.HasPrefix(p, "/healthz") || strings.HasPrefix(p, "/readyz") {
 			next.ServeHTTP(w, r)
 			return
@@ -431,18 +451,10 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		snap := s.rt.Get()
 		want := strings.TrimSpace(snap.Cfg.APIToken)
-		if want == "" {
-			next.ServeHTTP(w, r)
-			return
+		if p == "/api/v1/events/ingest" {
+			want = strings.TrimSpace(snap.Cfg.Push.Token)
 		}
-		got := strings.TrimSpace(r.Header.Get("X-Token"))
-		if got == "" {
-			got = strings.TrimSpace(r.Header.Get("Authorization"))
-			got = strings.TrimPrefix(got, "Bearer ")
-			got = strings.TrimPrefix(got, "bearer ")
-			got = strings.TrimSpace(got)
-		}
-		if got == "" || got != want {
+		if !tokenMatches(requestAuthToken(r), want) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
@@ -509,6 +521,103 @@ func sanitizeRuleSet(rs rulesrepo.RuleSet) rulesrepo.RuleSet {
 	return rs
 }
 
+func looksRedacted(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "***" {
+		return true
+	}
+	// maskSecret for values longer than 6 chars always yields 2 + "***" + 2.
+	return len(v) == 7 && v[2:5] == "***"
+}
+
+func restoreSecret(incoming, current string) string {
+	in := strings.TrimSpace(incoming)
+	if looksRedacted(in) || (in != "" && in == maskSecret(current)) {
+		return current
+	}
+	return incoming
+}
+
+func restoreHeaderMap(in, cur map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		prev := ""
+		if cur != nil {
+			prev = cur[k]
+		}
+		out[k] = restoreSecret(v, prev)
+	}
+	return out
+}
+
+func restoreRuleSetSecrets(in, cur rulesrepo.RuleSet) rulesrepo.RuleSet {
+	in.N9E.UserToken = restoreSecret(in.N9E.UserToken, cur.N9E.UserToken)
+	in.N9E.Authorization = restoreSecret(in.N9E.Authorization, cur.N9E.Authorization)
+	in.Push.Token = restoreSecret(in.Push.Token, cur.Push.Token)
+	in.State.Redis.Password = restoreSecret(in.State.Redis.Password, cur.State.Redis.Password)
+	in.DingTalk.Webhook = restoreSecret(in.DingTalk.Webhook, cur.DingTalk.Webhook)
+	in.DingTalk.Secret = restoreSecret(in.DingTalk.Secret, cur.DingTalk.Secret)
+
+	curRoutes := make(map[string]config.RouteConfig, len(cur.Routes))
+	for i := range cur.Routes {
+		rc := cur.Routes[i]
+		name := strings.TrimSpace(rc.Name)
+		if name == "" {
+			name = "route-" + strconv.Itoa(i)
+		}
+		curRoutes[strings.ToLower(name)] = rc
+	}
+	routes := make([]config.RouteConfig, len(in.Routes))
+	for i := range in.Routes {
+		rc := in.Routes[i]
+		name := strings.TrimSpace(rc.Name)
+		if name == "" {
+			name = "route-" + strconv.Itoa(i)
+		}
+		prev := curRoutes[strings.ToLower(name)]
+		rc.Notify.Webhook.URL = restoreSecret(rc.Notify.Webhook.URL, prev.Notify.Webhook.URL)
+		rc.Notify.Webhook.Headers = restoreHeaderMap(rc.Notify.Webhook.Headers, prev.Notify.Webhook.Headers)
+		if len(rc.Notify.Escalations) > 0 {
+			es := make([]config.EscalationConfig, len(rc.Notify.Escalations))
+			for j := range rc.Notify.Escalations {
+				e := rc.Notify.Escalations[j]
+				var prevE config.EscalationConfig
+				if j < len(prev.Notify.Escalations) {
+					prevE = prev.Notify.Escalations[j]
+				}
+				e.Webhook.URL = restoreSecret(e.Webhook.URL, prevE.Webhook.URL)
+				e.Webhook.Headers = restoreHeaderMap(e.Webhook.Headers, prevE.Webhook.Headers)
+				es[j] = e
+			}
+			rc.Notify.Escalations = es
+		}
+		routes[i] = rc
+	}
+	in.Routes = routes
+
+	curRobots := make(map[string]config.RobotConfig, len(cur.Robots))
+	for i := range cur.Robots {
+		rb := cur.Robots[i]
+		id := strings.ToLower(strings.TrimSpace(rb.ID))
+		if id != "" {
+			curRobots[id] = rb
+		}
+	}
+	robots := make([]config.RobotConfig, len(in.Robots))
+	for i := range in.Robots {
+		rb := in.Robots[i]
+		prev := curRobots[strings.ToLower(strings.TrimSpace(rb.ID))]
+		rb.Webhook = restoreSecret(rb.Webhook, prev.Webhook)
+		rb.Secret = restoreSecret(rb.Secret, prev.Secret)
+		robots[i] = rb
+	}
+	in.Robots = robots
+	return in
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
@@ -551,19 +660,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok := strings.TrimSpace(s.ing.Token())
-	if tok != "" {
-		got := strings.TrimSpace(r.Header.Get("X-Token"))
-		if got == "" {
-			got = strings.TrimSpace(r.Header.Get("Authorization"))
-			got = strings.TrimPrefix(got, "Bearer ")
-			got = strings.TrimPrefix(got, "bearer ")
-			got = strings.TrimSpace(got)
-		}
-		if got == "" || got != tok {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-			return
-		}
+	if !tokenMatches(requestAuthToken(r), s.ing.Token()) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
 	}
 
 	var raw any
@@ -768,8 +867,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	pd := snap.Eng.PullDebug()
 	active, recovered, total := s.st.Summary()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"time":   time.Now().UTC().Format(time.RFC3339),
-		"engine": st,
+		"time":       time.Now().UTC().Format(time.RFC3339),
+		"engine":     st,
 		"pull_debug": pd,
 		"state": map[string]any{
 			"active":    active,
@@ -841,6 +940,8 @@ func (s *Server) handleRulesPublish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
+	snap := s.rt.Get()
+	req.RuleSet = restoreRuleSetSecrets(req.RuleSet, rulesrepo.ExtractFromConfig(snap.Cfg))
 	if err := validateRuleSet(req.RuleSet); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -850,7 +951,6 @@ func (s *Server) handleRulesPublish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	snap := s.rt.Get()
 	newCfg := rulesrepo.ApplyToConfig(snap.Cfg, req.RuleSet)
 	eng, err := engine.New(newCfg, s.st)
 	if err != nil {
