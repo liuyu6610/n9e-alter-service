@@ -29,6 +29,9 @@ type Record struct {
 	MissCount    int   `json:"miss_count"`
 	RecoveredAt  int64 `json:"recovered_at"`
 	LastNotified int64 `json:"last_notified"`
+	// ChannelNotified is last successful notify time per destination
+	// (webhook / robot:<id>). Nil means legacy whole-event LastNotified.
+	ChannelNotified map[string]int64 `json:"channel_notified,omitempty"`
 
 	LastEscalatedAt int64 `json:"last_escalated_at"`
 	EscalatedStep   int   `json:"escalated_step"`
@@ -185,7 +188,7 @@ func (s *Store) ApplyIngest(now time.Time, items []InputEvent) ApplyResult {
 			r.Status = StatusActive
 			r.FirstSeenAt = nowUnix
 			r.RecoveredAt = 0
-			r.LastNotified = 0
+			r.clearNotifyLocked()
 			r.LastEscalatedAt = 0
 			r.EscalatedStep = 0
 			r.MissCount = 0
@@ -350,7 +353,7 @@ func (s *Store) ApplyPull(now time.Time, items []InputEvent, opt ApplyOptions) A
 			r.Status = StatusActive
 			r.FirstSeenAt = nowUnix
 			r.RecoveredAt = 0
-			r.LastNotified = 0
+			r.clearNotifyLocked()
 			r.MissCount = 0
 			res.NewActives = append(res.NewActives, *r)
 			s.markDirtyLocked()
@@ -400,7 +403,7 @@ func (s *Store) ApplyPull(now time.Time, items []InputEvent, opt ApplyOptions) A
 			if r.MissCount >= recoverMiss {
 				r.Status = StatusRecovered
 				r.RecoveredAt = nowUnix
-				r.LastNotified = 0
+				r.clearNotifyLocked()
 				res.NewRecovereds = append(res.NewRecovereds, *r)
 			}
 			s.markDirtyLocked()
@@ -462,7 +465,7 @@ func (s *Store) ForEachRecord(fn func(Record) bool) {
 		if r == nil {
 			continue
 		}
-		if !fn(*r) {
+		if !fn(cloneRecord(*r)) {
 			return
 		}
 	}
@@ -479,7 +482,7 @@ func (s *Store) Get(serviceHash string) (Record, bool) {
 	if !ok || r == nil {
 		return Record{}, false
 	}
-	return *r, true
+	return cloneRecord(*r), true
 }
 
 func (s *Store) List(status Status, routeName string, offset int, limit int) ([]Record, int) {
@@ -506,7 +509,7 @@ func (s *Store) List(status Status, routeName string, offset int, limit int) ([]
 		if routeName != "" && r.RouteName != routeName {
 			continue
 		}
-		items = append(items, *r)
+		items = append(items, cloneRecord(*r))
 	}
 	s.mu.RUnlock()
 
@@ -556,6 +559,32 @@ func (s *Store) MarkNotified(serviceHash string, ts int64) bool {
 	return true
 }
 
+// MarkChannelNotified records a successful send on one destination.
+// LastNotified is the latest successful channel time (UI / legacy readers).
+func (s *Store) MarkChannelNotified(serviceHash string, channel string, ts int64) bool {
+	serviceHash = stringsTrim(serviceHash)
+	channel = stringsTrim(channel)
+	if serviceHash == "" || channel == "" {
+		return false
+	}
+	s.mu.Lock()
+	r, ok := s.records[serviceHash]
+	if !ok || r == nil {
+		s.mu.Unlock()
+		return false
+	}
+	if r.ChannelNotified == nil {
+		r.ChannelNotified = map[string]int64{}
+	}
+	r.ChannelNotified[channel] = ts
+	if ts > r.LastNotified {
+		r.LastNotified = ts
+	}
+	s.markDirtyLocked()
+	s.mu.Unlock()
+	return true
+}
+
 func (s *Store) MarkEscalated(serviceHash string, step int, ts int64) bool {
 	serviceHash = stringsTrim(serviceHash)
 	if serviceHash == "" {
@@ -595,8 +624,8 @@ func (s *Store) ResetRouteDaily(routeName string) int {
 		if r.Status != StatusActive {
 			continue
 		}
-		if r.LastNotified != 0 {
-			r.LastNotified = 0
+		if r.LastNotified != 0 || len(r.ChannelNotified) > 0 {
+			r.clearNotifyLocked()
 			changed++
 			s.markDirtyLocked()
 		}
@@ -635,7 +664,7 @@ func (s *Store) PickNotifyActive(routeName string, nowUnix int64, observeSeconds
 		if r.LastNotified > 0 && nowUnix-r.LastNotified < int64(repeatIntervalSeconds) {
 			continue
 		}
-		items = append(items, *r)
+		items = append(items, cloneRecord(*r))
 		if len(items) >= limit {
 			break
 		}
@@ -705,7 +734,7 @@ func (s *Store) PickNotifyRecovered(routeName string, nowUnix int64, limit int) 
 		if r.LastNotified != 0 {
 			continue
 		}
-		items = append(items, *r)
+		items = append(items, cloneRecord(*r))
 		if len(items) >= limit {
 			break
 		}
@@ -716,6 +745,31 @@ func (s *Store) PickNotifyRecovered(routeName string, nowUnix int64, limit int) 
 
 func stringsTrim(s string) string {
 	return strings.TrimSpace(s)
+}
+
+func (r *Record) clearNotifyLocked() {
+	if r == nil {
+		return
+	}
+	r.LastNotified = 0
+	r.ChannelNotified = nil
+}
+
+func cloneRecord(r Record) Record {
+	r.Tags = cloneTags(r.Tags)
+	r.ChannelNotified = cloneChannelNotified(r.ChannelNotified)
+	return r
+}
+
+func cloneChannelNotified(m map[string]int64) map[string]int64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *Store) markDirtyLocked() {
