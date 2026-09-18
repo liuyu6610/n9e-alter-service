@@ -170,3 +170,45 @@ func TestHandleIngest_RequiresMatchingPushToken(t *testing.T) {
 		t.Fatalf("expected 200 with push token, got %d body=%s", rwOK.Code, rwOK.Body.String())
 	}
 }
+
+func TestWithAuth_HealthzPrefixDoesNotBypassAPI(t *testing.T) {
+	s := &Server{rt: runtime.New(runtime.Snapshot{Cfg: config.Config{APIToken: "tok"}})}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := s.withAuth(next)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/healthz/../api/v1/status", nil)
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for cleaned /api path via /healthz/.., got %d", rw.Code)
+	}
+
+	reqOK := httptest.NewRequest(http.MethodGet, "http://example/healthz", nil)
+	rwOK := httptest.NewRecorder()
+	h.ServeHTTP(rwOK, reqOK)
+	if rwOK.Code != http.StatusOK {
+		t.Fatalf("expected 200 for exact /healthz, got %d", rwOK.Code)
+	}
+
+	reqReady := httptest.NewRequest(http.MethodGet, "http://example/readyz-not-really", nil)
+	rwReady := httptest.NewRecorder()
+	h.ServeHTTP(rwReady, reqReady)
+	if rwReady.Code != http.StatusOK {
+		t.Fatalf("non-API path remains public, got %d", rwReady.Code)
+	}
+}
+
+func TestDecodeJSONBody_RejectsOversize(t *testing.T) {
+	payload := `"` + strings.Repeat("x", maxJSONBodyBytes+1) + `"`
+	req := httptest.NewRequest(http.MethodPost, "http://example/", strings.NewReader(payload))
+	rw := httptest.NewRecorder()
+	var dst any
+	if decodeJSONBody(rw, req, &dst) {
+		t.Fatal("expected oversize body to be rejected")
+	}
+	if rw.Code != http.StatusRequestEntityTooLarge && rw.Code != http.StatusBadRequest {
+		t.Fatalf("expected 413 or 400, got %d body=%s", rw.Code, rw.Body.String())
+	}
+}

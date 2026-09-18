@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +39,23 @@ type AuditRecord struct {
 
 type Repo struct {
 	root string
+}
+
+// ErrInvalidVersion is returned when a version name is empty or not a safe file name.
+var ErrInvalidVersion = errors.New("invalid version")
+
+func validVersionName(ver string) bool {
+	if ver == "" || strings.Contains(ver, "..") {
+		return false
+	}
+	for _, r := range ver {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func New(dataDir string) *Repo {
@@ -110,8 +126,8 @@ func (r *Repo) ListVersions() ([]string, error) {
 
 func (r *Repo) ReadVersion(ver string) (RuleSet, string, error) {
 	ver = strings.TrimSpace(ver)
-	if ver == "" {
-		return RuleSet{}, "", fmt.Errorf("version is empty")
+	if !validVersionName(ver) {
+		return RuleSet{}, "", ErrInvalidVersion
 	}
 	p := filepath.Join(r.VersionsDir(), ver+".json")
 	b, err := os.ReadFile(p)
@@ -139,10 +155,10 @@ func (r *Repo) Publish(rs RuleSet, message string, actor string) (string, string
 	h := hashBytes(b)
 
 	vp := filepath.Join(r.VersionsDir(), ver+".json")
-	if err := atomicWriteFile(vp, b, 0o644); err != nil {
+	if err := atomicWriteFile(vp, b, 0o600); err != nil {
 		return "", "", err
 	}
-	if err := atomicWriteFile(r.CurrentPath(), b, 0o644); err != nil {
+	if err := atomicWriteFile(r.CurrentPath(), b, 0o600); err != nil {
 		return "", "", err
 	}
 	_ = r.appendAudit(AuditRecord{AtUnix: time.Now().Unix(), Action: "publish", Version: ver, Hash: h, Message: message, Actor: actor})
@@ -158,7 +174,7 @@ func (r *Repo) Rollback(toVersion string, message string, actor string) (string,
 	if err != nil {
 		return "", "", err
 	}
-	if err := atomicWriteFile(r.CurrentPath(), b, 0o644); err != nil {
+	if err := atomicWriteFile(r.CurrentPath(), b, 0o600); err != nil {
 		return "", "", err
 	}
 	_ = r.appendAudit(AuditRecord{AtUnix: time.Now().Unix(), Action: "rollback", Version: strings.TrimSpace(toVersion), Hash: h, Message: message, Actor: actor})
