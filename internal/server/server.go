@@ -710,6 +710,10 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "queue full"})
 			return
 		}
+		if errors.Is(err, ingest.ErrNoWorkers) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "push ingest has no workers"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}

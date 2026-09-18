@@ -181,7 +181,9 @@ func (n *Notifier) tick() {
 			if observe > 0 && now-rec.FirstSeenAt < int64(observe) {
 				return true
 			}
-			if rec.LastNotified > 0 && now-rec.LastNotified < int64(repeat) {
+			robots, _ := resolver.ResolveRobotsForRecord(rec, p.routeName, p.routeRobot, p.globalCfg)
+			dests := destChannels(p.webhook, robots)
+			if !rec.AnyChannelDue(dests, now, repeat, false) {
 				return true
 			}
 			items := actives[p.routeName]
@@ -200,7 +202,9 @@ func (n *Notifier) tick() {
 			if limit <= 0 {
 				limit = 1000
 			}
-			if rec.LastNotified != 0 {
+			robots, _ := resolver.ResolveRobotsForRecord(rec, p.routeName, p.routeRobot, p.globalCfg)
+			dests := destChannels(p.webhook, robots)
+			if !rec.AnyChannelDue(dests, now, 0, true) {
 				return true
 			}
 			items := recovereds[p.routeName]
@@ -216,10 +220,10 @@ func (n *Notifier) tick() {
 	for i := range plans {
 		p := plans[i]
 		if items := actives[p.routeName]; len(items) > 0 {
-			n.sendByRobots(cfg, resolver, p.routeName, p.routeRobot, p.globalCfg, p.webhook, items, true, activeTotal[p.routeName], p.maxLines, p.maxChars, now)
+			n.sendByRobots(cfg, resolver, p.routeName, p.routeRobot, p.globalCfg, p.webhook, items, true, activeTotal[p.routeName], p.maxLines, p.maxChars, now, p.repeatSec)
 		}
 		if items := recovereds[p.routeName]; len(items) > 0 {
-			n.sendByRobots(cfg, resolver, p.routeName, p.routeRobot, p.globalCfg, p.webhook, items, false, recoveredTotal[p.routeName], p.maxLines, p.maxChars, now)
+			n.sendByRobots(cfg, resolver, p.routeName, p.routeRobot, p.globalCfg, p.webhook, items, false, recoveredTotal[p.routeName], p.maxLines, p.maxChars, now, p.repeatSec)
 		}
 		if byStep := escalations[p.routeName]; len(byStep) > 0 {
 			stepKeys := make([]int, 0, len(byStep))
@@ -582,7 +586,53 @@ func toString(v any) string {
 	return ""
 }
 
-func (n *Notifier) sendByRobots(cfg config.Config, resolver *RobotResolver, routeName string, routeRobotID string, globalCfg dingtalk.Config, webhookCfg config.WebhookConfig, items []state.Record, active bool, total int, maxLines int, maxChars int, now int64) {
+func destChannels(webhookCfg config.WebhookConfig, robots []ResolvedRobot) []string {
+	out := make([]string, 0, 1+len(robots))
+	if webhookCfg.Enabled && strings.TrimSpace(webhookCfg.URL) != "" {
+		out = append(out, state.ChannelWebhook)
+	}
+	seen := map[string]struct{}{}
+	for _, rb := range robots {
+		if strings.TrimSpace(rb.Cfg.Webhook) == "" {
+			continue
+		}
+		ch := state.ChannelRobot(rb.ID)
+		if _, ok := seen[ch]; ok {
+			continue
+		}
+		seen[ch] = struct{}{}
+		out = append(out, ch)
+	}
+	return out
+}
+
+func filterChannelDue(items []state.Record, channel string, now int64, repeatSeconds int, recovered bool) []state.Record {
+	out := make([]state.Record, 0, len(items))
+	for i := range items {
+		if items[i].ChannelDue(channel, now, repeatSeconds, recovered) {
+			out = append(out, items[i])
+		}
+	}
+	return out
+}
+
+func (n *Notifier) markChannel(items []state.Record, channel string, now int64) {
+	if n == nil || n.st == nil || channel == "" {
+		return
+	}
+	for _, it := range items {
+		_ = n.st.MarkChannelNotified(it.ServiceHash, channel, now)
+	}
+}
+
+func (n *Notifier) notifyMarkdown(active bool, routeName string, items []state.Record, total int, maxLines int, maxChars int) (string, string) {
+	if active {
+		return report.BuildActiveMarkdown("N9E 告警通知", routeName, items, total, maxLines, maxChars)
+	}
+	return report.BuildRecoveredMarkdown("N9E 告警恢复", routeName, items, maxLines, maxChars)
+}
+
+func (n *Notifier) sendByRobots(cfg config.Config, resolver *RobotResolver, routeName string, routeRobotID string, globalCfg dingtalk.Config, webhookCfg config.WebhookConfig, items []state.Record, active bool, total int, maxLines int, maxChars int, now int64, repeatSeconds int) {
 	if len(items) == 0 {
 		return
 	}
@@ -632,6 +682,7 @@ func (n *Notifier) sendByRobots(cfg config.Config, resolver *RobotResolver, rout
 	}
 	sort.Strings(keys)
 
+	recovered := !active
 	for _, k := range keys {
 		b := by[k]
 		if b == nil {
@@ -639,40 +690,56 @@ func (n *Notifier) sendByRobots(cfg config.Config, resolver *RobotResolver, rout
 		}
 		batch := b.items
 		robots := b.robots
-
-		var title, text string
-		if active {
-			title, text = report.BuildActiveMarkdown("N9E 告警通知", routeName, batch, total, maxLines, maxChars)
-		} else {
-			title, text = report.BuildRecoveredMarkdown("N9E 告警恢复", routeName, batch, maxLines, maxChars)
-		}
-
-		sentAny := false
-		if webhookCfg.Enabled && strings.TrimSpace(webhookCfg.URL) != "" {
-			payload := map[string]any{
-				"time_unix": now,
-				"route":     routeName,
-				"active":    active,
-				"title":     title,
-				"text":      text,
-				"total":     total,
-				"items":     batch,
+		dests := destChannels(webhookCfg, robots)
+		dueBatch := make([]state.Record, 0, len(batch))
+		for i := range batch {
+			if batch[i].AnyChannelDue(dests, now, repeatSeconds, recovered) {
+				dueBatch = append(dueBatch, batch[i])
 			}
-			if err := n.sendWebhook(webhookCfg, payload); err != nil {
-				if n.stt != nil {
-					n.stt.IncNotifySendError(1)
+		}
+		if len(dueBatch) == 0 {
+			continue
+		}
+		batch = dueBatch
+
+		if webhookCfg.Enabled && strings.TrimSpace(webhookCfg.URL) != "" {
+			webhookDue := filterChannelDue(batch, state.ChannelWebhook, now, repeatSeconds, recovered)
+			if len(webhookDue) > 0 {
+				title, text := n.notifyMarkdown(active, routeName, webhookDue, total, maxLines, maxChars)
+				payload := map[string]any{
+					"time_unix": now,
+					"route":     routeName,
+					"active":    active,
+					"title":     title,
+					"text":      text,
+					"total":     total,
+					"items":     webhookDue,
 				}
-				log.Printf("notify webhook route=%s active=%v err=%v", routeName, active, err)
-			} else {
-				if n.stt != nil {
-					n.stt.IncNotifySendOK(1)
+				if err := n.sendWebhook(webhookCfg, payload); err != nil {
+					if n.stt != nil {
+						n.stt.IncNotifySendError(1)
+					}
+					log.Printf("notify webhook route=%s active=%v err=%v", routeName, active, err)
+				} else {
+					if n.stt != nil {
+						n.stt.IncNotifySendOK(1)
+					}
+					n.markChannel(webhookDue, state.ChannelWebhook, now)
 				}
-				sentAny = true
 			}
 		}
 		for _, rb := range robots {
 			dtCfg := rb.Cfg
 			if strings.TrimSpace(dtCfg.Webhook) == "" {
+				continue
+			}
+			ch := state.ChannelRobot(rb.ID)
+			robotDue := filterChannelDue(batch, ch, now, repeatSeconds, recovered)
+			if len(robotDue) == 0 {
+				continue
+			}
+			title, text := n.notifyMarkdown(active, routeName, robotDue, total, maxLines, maxChars)
+			if n.dt == nil {
 				continue
 			}
 			sent := true
@@ -704,18 +771,29 @@ func (n *Notifier) sendByRobots(cfg config.Config, resolver *RobotResolver, rout
 			if n.stt != nil {
 				n.stt.IncNotifySendOK(1)
 			}
-			sentAny = true
+			n.markChannel(robotDue, ch, now)
 		}
-		if !sentAny {
+
+		done := make([]state.Record, 0, len(batch))
+		for i := range batch {
+			rec := batch[i]
+			if n.st != nil {
+				if latest, ok := n.st.Get(batch[i].ServiceHash); ok {
+					rec = latest
+				}
+			}
+			if rec.AnyChannelDue(dests, now, repeatSeconds, recovered) {
+				continue
+			}
+			done = append(done, batch[i])
+		}
+		if len(done) == 0 {
 			continue
 		}
-		for _, it := range batch {
-			_ = n.st.MarkNotified(it.ServiceHash, now)
-		}
 		if active {
-			n.resetBucketsAfterNotify(routeName, batch)
+			n.resetBucketsAfterNotify(routeName, done)
 		} else {
-			n.deleteBucketsAfterRecovered(routeName, batch)
+			n.deleteBucketsAfterRecovered(routeName, done)
 		}
 	}
 }
