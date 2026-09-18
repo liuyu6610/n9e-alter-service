@@ -49,13 +49,13 @@ Go 版 N9E 告警处理服务：
 1) State 状态机
 
 - active / recovered
-- 记录首次出现/最后出现/缺失次数、最后通知时间、升级通知进度
+- 记录首次出现/最后出现/缺失次数、**每个通知通道**的最后成功时间（webhook / 机器人），以及升级通知进度
 - snapshot 定期落盘（建议集群挂 PVC）
 - **recovered 只由成功的 Pull 推进**（连续 miss 达到 `recover_miss_count`）。Push ingest 不会因为批次里缺了某条就恢复它，详见「恢复语义」。
 
 1) Workers
 
-- notify：按 route 聚合并发送（支持 silence、repeat interval、escalation）
+- notify：按 route 聚合并发送（支持 silence、repeat interval、escalation）。多通道时按通道记账：成功的通道不会在 repeat 窗口内重发，失败的通道会继续重试。
 - daily report：cron 触发生成日报
 
 ### 关键概念
@@ -174,6 +174,8 @@ go run . -config config.json
 - `push.token`：push 鉴权 token（敏感字段）
 - `push.queue_size` / `push.worker_count`：吞吐相关
 - `push.enqueue_timeout_milli`：入队超时
+
+热开启（规则发布把 `push.enabled` 从 false 改为 true）会立刻拉起 ingest worker。若 worker 尚未运行（例如进程启动时未调用 `Start`），`POST /api/v1/events/ingest` **拒绝入队**（HTTP 503 / `push ingest has no workers`），避免事件进入没有消费者的队列。
 
 ### 状态与 Redis（state）
 
@@ -524,6 +526,7 @@ README 下半部分保留了 ConfigMap/PVC/Deployment/Service 示例，你可以
   - 检查 silence 是否命中
   - 检查 `repeat_interval_seconds` 是否导致未到发送窗口
   - 看服务日志：`notify webhook route=... err=...`
+  - 多通道时看 snapshot 里的 `channel_notified`：某个通道成功不会再把其它失败通道标成已通知
 
 - **只收到 escalation 不收到常规 webhook**：
   - 旧版本逻辑会要求至少一个 robot；当前版本已支持 webhook-only route
@@ -542,6 +545,9 @@ README 下半部分保留了 ConfigMap/PVC/Deployment/Service 示例，你可以
 
 - **push 注入的告警一直 active / 没有恢复通知**：
   - 恢复只走 pull。本地未配 `n9e.base_url` 时 pull 会被 skip。混用时，N9E 当前列表里没有的 hash 会在成功 pull 后按 `recover_miss_count` 恢复。
+
+- **push 热开启后事件入队但不消费**：
+  - 规则发布启用 push 会拉起 worker；若仍无 worker，ingest 返回 503 而不是默默堆积
 
 - **pull skipped**：
   - 未配置 `n9e.base_url` 属正常（本地仅 push 时可忽略）

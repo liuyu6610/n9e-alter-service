@@ -212,3 +212,16 @@ func TestDecodeJSONBody_RejectsOversize(t *testing.T) {
 		t.Fatalf("expected 413 or 400, got %d body=%s", rw.Code, rw.Body.String())
 	}
 }
+
+func TestHandleIngest_NoWorkersFailsClosed(t *testing.T) {
+	cfg := config.Config{Push: config.PushConfig{Enabled: true, Token: "push-tok", QueueSize: 4, WorkerCount: 1}}
+	s := &Server{ing: ingest.New(cfg.Push, cfg.State, nil, nil, nil, nil)}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example/api/v1/events/ingest", strings.NewReader(`[{"id":1,"hash":"h"}]`))
+	req.Header.Set("Authorization", "Bearer push-tok")
+	rw := httptest.NewRecorder()
+	s.handleIngest(rw, req)
+	if rw.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no workers, got %d body=%s", rw.Code, rw.Body.String())
+	}
+}

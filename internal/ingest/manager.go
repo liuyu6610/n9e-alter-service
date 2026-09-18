@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,7 +21,10 @@ import (
 	"n9e-alter-service/internal/telemetry"
 )
 
-var ErrQueueFull = errors.New("ingest queue full")
+var (
+	ErrQueueFull = errors.New("ingest queue full")
+	ErrNoWorkers = errors.New("push ingest has no workers")
+)
 
 type Manager struct {
 	cfgV      atomic.Value
@@ -30,6 +35,10 @@ type Manager struct {
 	stt       *telemetry.Stats
 
 	queue chan []n9e.CurEvent
+
+	mu      sync.Mutex
+	runCtx  context.Context
+	started int
 }
 
 func New(cfg config.PushConfig, stateCfg config.StateConfig, eng *engine.Engine, st *state.Store, rm *redismgr.Manager, stats *telemetry.Stats) *Manager {
@@ -84,9 +93,30 @@ func (m *Manager) SetConfig(cfg config.PushConfig, stateCfg config.StateConfig) 
 	}
 	m.cfgV.Store(cfg)
 	m.stateCfgV.Store(stateCfg)
+	m.ensureWorkers()
 }
 
 func (m *Manager) Start(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.runCtx = ctx
+	m.mu.Unlock()
+	m.ensureWorkers()
+}
+
+func (m *Manager) RunningWorkers() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	n := m.started
+	m.mu.Unlock()
+	return n
+}
+
+func (m *Manager) ensureWorkers() {
 	if m == nil {
 		return
 	}
@@ -94,12 +124,24 @@ func (m *Manager) Start(ctx context.Context) {
 	if !cfg.Enabled {
 		return
 	}
-	wc := cfg.WorkerCount
-	if wc <= 0 {
-		wc = 8
+	want := cfg.WorkerCount
+	if want <= 0 {
+		want = 8
 	}
-	for i := 0; i < wc; i++ {
-		go m.worker(ctx)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.runCtx == nil {
+		return
+	}
+	spawned := 0
+	for m.started < want {
+		m.started++
+		spawned++
+		go m.worker(m.runCtx)
+	}
+	if spawned > 0 {
+		log.Printf("push ingest workers running=%d", m.started)
 	}
 }
 
@@ -113,6 +155,10 @@ func (m *Manager) Enqueue(ctx context.Context, batch []n9e.CurEvent) error {
 	}
 	if len(batch) == 0 {
 		return nil
+	}
+	m.ensureWorkers()
+	if m.RunningWorkers() == 0 {
+		return ErrNoWorkers
 	}
 	if m.stt != nil {
 		m.stt.IncIngestBatches(1)
