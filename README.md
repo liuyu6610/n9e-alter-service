@@ -51,6 +51,7 @@ Go 版 N9E 告警处理服务：
 - active / recovered
 - 记录首次出现/最后出现/缺失次数、**每个通知通道**的最后成功时间（webhook / 机器人），以及升级通知进度
 - snapshot 定期落盘（建议集群挂 PVC）
+- **recovered 只由成功的 Pull 推进**（连续 miss 达到 `recover_miss_count`）。Push ingest 不会因为批次里缺了某条就恢复它，详见「恢复语义」。
 
 1) Workers
 
@@ -180,8 +181,8 @@ go run . -config config.json
 
 - `state.snapshot_file`：快照文件（建议集群挂 PVC）
 - `state.snapshot_interval_seconds`：快照间隔
-- `state.retain_recovered_seconds`：保留 recovered 的时间
-- `state.recover_miss_count`：缺失多少轮 pull 才判定恢复
+- `state.retain_recovered_seconds`：保留 recovered 的时间（默认 86400；`<=0` 时按 86400 处理）
+- `state.recover_miss_count`：连续多少轮 **Pull** 未再看到该告警才判定恢复（见下文「恢复语义」；`<=0` 时按 1 处理）
 
 Redis 仅用于高并发去重/聚合热 bucket（不用于持久化）：
 
@@ -228,23 +229,77 @@ routes 是核心配置，每条 route 包含：
 - `robots`：机器人列表（支持 fallback）
 - `bindings`：绑定规则（按 group/rule/tags/tag_regex 等匹配机器人）
 
+## 鉴权（api_token / push.token）
+
+空 token **不会**关闭鉴权。未配置或为空时，对应接口返回 **401**。探针与静态 UI 除外。
+
+| 范围 | Token | 请求头 | 空值行为 | 配置 / 环境变量 |
+| --- | --- | --- | --- | --- |
+| 除 ingest 外的 `/api/*` | `api_token` | `X-Token` 或 `Authorization: Bearer` | **401**（不是“关闭鉴权”） | `api_token` / `API_TOKEN` |
+| `POST /api/v1/events/ingest` | `push.token` | 同上 | **401**（即使 `api_token` 有值也不放行） | `push.token` / `PUSH_TOKEN` |
+| `/healthz`、`/readyz`、Web UI 静态文件 | 无 | — | 不鉴权 | — |
+
+要点：
+
+- **两个 token 互相独立**：ingest 只认 `push.token`，其它 API 只认 `api_token`。用 `api_token` 调 ingest、或用 `push.token` 调 `/api/v1/status` 都会 401。
+- **Web UI Settings 页的 “API Token”** 只写入浏览器 `localStorage`，给前端请求带头；**不会**改服务端 `api_token`。服务端 token 来自 `config.json` / env，不在 RuleSet 里，publish 无法热更新它。
+- `push.token` **在** RuleSet 里，可通过 Settings 发布热更新。发布时若 GET 回来的是脱敏占位符，会按下一节还原，不会把 `***` 写成真实 token。
+- 请求头以外的位置（query、body）**不**作为凭据。Access log 只记 path，不记 query。
+- `X-User-Token` 只用于本服务访问 N9E（`n9e.user_token`），与本服务 HTTP API 鉴权无关。
+
+## 规则发布与敏感字段还原
+
+`GET /api/v1/rules/current` 与 `GET /api/v1/rules/version` 返回的 RuleSet **会脱敏**。Settings 页再把这份 JSON `POST /api/v1/rules/publish` 时，服务端会在写入 `data/rules/current.json` 之前，把占位符还原成当前运行时密钥。
+
+脱敏规则：
+
+- 长度 `<= 6`：变成 `***`
+- 更长：保留首 2 位与末 2 位，中间为 `***`（例如 `n9e-user-token-real` → `n9***al`）
+
+还原规则（`POST /api/v1/rules/publish`）：
+
+- 字段值是 `***`，或等于当前值的 `maskSecret` 结果 → **保留磁盘/运行时上的真实值**
+- 字段值是新的非占位符字符串 → **按新值覆盖**
+- 字段值是空字符串 → **按空值写入**（视为显式清空，不会还原）
+
+会还原的字段包括：`n9e.user_token` / `n9e.authorization`、`push.token`、`state.redis.password`、`dingtalk.webhook` / `dingtalk.secret`、route/escalation 的 webhook `url` 与 `headers`、robots 的 `webhook` / `secret`。按 route `name`、robot `id`、escalation 下标对齐。
+
+`api_token` 不在 RuleSet 中，GET/publish 都不触及它。
+
+规则文件（`current.json` 与 versions）按 owner-only（`0600`）写入，避免把还原后的真实密钥暴露给同机其它用户。
+
+## 恢复语义（仅 Pull 判定 recovered）
+
+状态机里的 **recovered 只由 Pull 路径产生**（`Store.ApplyPull`）。Push ingest（`Store.ApplyIngest`）只会把事件标成 **active**，**不会**因为某次 push 批次里没带上该告警就把它恢复。
+
+| 行为 | Pull（N9E 当前告警列表 / `POST /api/v1/pull/run`） | Push（`POST /api/v1/events/ingest`） |
+| --- | --- | --- |
+| 看到事件 | 置为 active，`miss_count=0` | 置为 active，`miss_count=0` |
+| 本轮没看到已有 active | `miss_count++`；达到 `state.recover_miss_count` → **recovered** | **忽略**，保持 active |
+| 失败 / 未执行 | `n9e.base_url` 为空会 skip pull；N9E 请求失败不调用 `ApplyPull`，**不会**误恢复 | 入队失败不影响已有状态 |
+| 成功但列表为空 | 视为所有 active 都 missing，会按 miss count **恢复** | 空 `[]` 不改变已有告警 |
+| recovered 后再出现 | 重新 active（清除 recovered/通知/升级进度） | 同样重新 active |
+| 清理 | recovered 超过 `retain_recovered_seconds` 后从 snapshot 删除 | 不清理 |
+
+运维含义：
+
+- **纯 push 联调**（`n9e.base_url` 为空）：pull 被 skip，告警会一直 active，直到你配置了 N9E 并跑成功的 pull，或进程丢状态。不要指望“停止 push”会发出恢复通知。
+- **pull + push 混用**：Pull 是恢复的权威来源。只通过 push 注入、从未出现在 N9E 当前告警列表里的记录，下一轮成功 pull 会按 miss 规则恢复。
+- 失败的 pull（超时、N9E 5xx）**不会**把全量告警打成 recovered；只有 **成功** 拉到的列表（包括空列表）才会推进 miss/recover。
+- `recover_miss_count` 用来抗单次漏拉。默认配置/示例里常见 `1` 或 `2`；代码里 `<=0` 按 `1` 处理。
+
 ## HTTP API 与规则版本库
-
-### 鉴权
-
-- 全局：`/api/*` 需要非空的 `api_token`（`X-Token` 或 `Authorization: Bearer`）。`api_token` 为空时返回 401，而不是关闭鉴权。
-- `POST /api/v1/events/ingest` 使用独立的 `push.token`（同样不允许空 token 公开访问）。`/healthz`、`/readyz` 与静态资源不鉴权。
 
 ### 规则版本库 API（核心）
 
 - `GET /api/v1/rules/current`：当前生效规则（敏感字段会脱敏）
-- `POST /api/v1/rules/publish`：发布一份新规则（原子写入 + 生成 version/hash + audit）。请求体里若仍是 GET 脱敏占位符，会保留当前真实密钥，不会写回 `current.json`。
+- `POST /api/v1/rules/publish`：发布一份新规则（还原脱敏占位符 + 原子写入 + version/hash + audit）
 - `POST /api/v1/rules/rollback`：回滚到历史 version（会写 audit）
 - `GET /api/v1/rules/versions`：版本列表
-- `GET /api/v1/rules/version?version=...`：获取某个版本
+- `GET /api/v1/rules/version?version=...`：获取某个版本（同样脱敏）
 - `GET /api/v1/rules/audits?limit=...`：审计列表
 
-发布/回滚会触发 runtime 热更新（Cfg/Engine/Redis client 等），无需重启。
+发布/回滚会触发 runtime 热更新（Cfg/Engine/Redis client 等），无需重启。JSON 请求体上限 8MiB。
 
 ## 可观测性（Observability）
 
@@ -375,16 +430,19 @@ docker run --rm -p 8080:8080 \
 
 规则发布/回滚会触发 runtime 热更新，无需重启。
 
+调用 `/api/*` 时带上 `api_token`（`X-Token` 或 `Authorization: Bearer`）。下面用环境变量 `API_TOKEN`。
+
 ### 1) 获取当前规则
 
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/rules/current
+curl -s -H "X-Token: $API_TOKEN" http://127.0.0.1:8080/api/v1/rules/current
 ```
 
 PowerShell：
 
 ```powershell
-Invoke-RestMethod -Method Get -Uri http://127.0.0.1:8080/api/v1/rules/current
+$headers = @{ 'X-Token' = $env:API_TOKEN }
+Invoke-RestMethod -Method Get -Uri http://127.0.0.1:8080/api/v1/rules/current -Headers $headers
 ```
 
 ### 2) 发布规则（publish）
@@ -393,6 +451,7 @@ Invoke-RestMethod -Method Get -Uri http://127.0.0.1:8080/api/v1/rules/current
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/api/v1/rules/publish \
+  -H "X-Token: $API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"rules": {"n9e": {}, "pull": {}, "push": {}, "state": {}, "silences": [], "routes": [], "robots": [], "bindings": [], "dingtalk": {}}, "message": "change routes", "actor": "sre"}'
 ```
@@ -415,7 +474,8 @@ $payload = @{
   message = 'change routes'
   actor = 'sre'
 }
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/rules/publish -ContentType 'application/json' -Body ($payload | ConvertTo-Json -Depth 20)
+$headers = @{ 'X-Token' = $env:API_TOKEN }
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/rules/publish -Headers $headers -ContentType 'application/json' -Body ($payload | ConvertTo-Json -Depth 20)
 ```
 
 > 实战建议：优先在 Web UI 的 Settings 页面修改并发布，它会生成完整 RuleSet（避免手写字段遗漏）。
@@ -423,14 +483,15 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/rules/publish -
 ### 3) 查看版本列表与审计
 
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/rules/versions
-curl -s 'http://127.0.0.1:8080/api/v1/rules/audits?limit=50'
+curl -s -H "X-Token: $API_TOKEN" http://127.0.0.1:8080/api/v1/rules/versions
+curl -s -H "X-Token: $API_TOKEN" 'http://127.0.0.1:8080/api/v1/rules/audits?limit=50'
 ```
 
 ### 4) 回滚（rollback）
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/api/v1/rules/rollback \
+  -H "X-Token: $API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"version":"20260102-xxxxxx","message":"rollback","actor":"sre"}'
 ```
@@ -439,7 +500,8 @@ PowerShell：
 
 ```powershell
 $payload = @{ version = '20260102-xxxxxx'; message = 'rollback'; actor = 'sre' }
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/rules/rollback -ContentType 'application/json' -Body ($payload | ConvertTo-Json)
+$headers = @{ 'X-Token' = $env:API_TOKEN }
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/rules/rollback -Headers $headers -ContentType 'application/json' -Body ($payload | ConvertTo-Json)
 ```
 
 ### 关键建议
@@ -473,13 +535,30 @@ README 下半部分保留了 ConfigMap/PVC/Deployment/Service 示例，你可以
   - webhook 发送已使用 `application/json; charset=utf-8`
 
 - **push 返回 401**：
-  - 检查 `push.token` 与请求头 `X-Token` 是否一致
+  - 检查 `push.enabled=true`、`push.token` 非空，且请求头 `X-Token` / `Authorization: Bearer` 与 `push.token` 一致（不要用 `api_token`）
+
+- **其它 `/api/*` 返回 401**：
+  - 空 `api_token` 现在是拒绝而不是放行。配置 `API_TOKEN` 或 `config.json` 的 `api_token`，请求带头。
+
+- **Settings 发布后密钥变成 `***`**：
+  - 当前版本会在 publish 时还原脱敏占位符。若仍被覆盖，确认请求体里不是把密钥改成了空字符串（空值会显式清空）。
+
+- **push 注入的告警一直 active / 没有恢复通知**：
+  - 恢复只走 pull。本地未配 `n9e.base_url` 时 pull 会被 skip。混用时，N9E 当前列表里没有的 hash 会在成功 pull 后按 `recover_miss_count` 恢复。
 
 - **push 热开启后事件入队但不消费**：
   - 规则发布启用 push 会拉起 worker；若仍无 worker，ingest 返回 503 而不是默默堆积
 
 - **pull skipped**：
   - 未配置 `n9e.base_url` 属正常（本地仅 push 时可忽略）
+
+## 测试与 CI
+
+```bash
+go test ./...
+```
+
+GitHub Actions（`.github/workflows/go-test.yml`）在 push / pull_request 上跑同一条命令。
 
 ## 前端开发/构建
 

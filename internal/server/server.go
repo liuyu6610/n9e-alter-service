@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -202,8 +203,7 @@ func (s *Server) handleRoutesPreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var raw any
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if !decodeJSONBody(w, r, &raw) {
 		return
 	}
 
@@ -431,7 +431,24 @@ func tokenMatches(got, want string) bool {
 	if want == "" || got == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+	sumGot := sha256.Sum256([]byte(got))
+	sumWant := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(sumGot[:], sumWant[:]) == 1
+}
+
+func requestPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return "/"
+	}
+	p := r.URL.Path
+	if p == "" {
+		return "/"
+	}
+	p = path.Clean(p)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
@@ -440,8 +457,8 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		p := r.URL.Path
-		if strings.HasPrefix(p, "/healthz") || strings.HasPrefix(p, "/readyz") {
+		p := requestPath(r)
+		if p == "/healthz" || p == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -666,8 +683,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var raw any
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if !decodeJSONBody(w, r, &raw) {
 		return
 	}
 
@@ -807,7 +823,7 @@ func (s *Server) handleRulesVersionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	rs, hash, err := s.repo.ReadVersion(ver)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		writeJSON(w, versionReadStatus(err), map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, rulesVersionGetResponse{
@@ -940,8 +956,7 @@ func (s *Server) handleRulesPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req publishRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	snap := s.rt.Get()
@@ -976,13 +991,12 @@ func (s *Server) handleRulesRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req rollbackRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	ver, hash, err := s.repo.Rollback(req.Version, req.Message, req.Actor)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		writeJSON(w, versionReadStatus(err), map[string]any{"error": err.Error()})
 		return
 	}
 	rs, _, ok, err := s.repo.LoadCurrent()
@@ -1091,6 +1105,36 @@ func (s *Server) handleAlertGet(w http.ResponseWriter, r *http.Request) {
 		"time": time.Now().UTC().Format(time.RFC3339),
 		"item": rec,
 	})
+}
+
+const maxJSONBodyBytes = 8 << 20
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r == nil || r.Body == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "payload too large"})
+			return false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return false
+	}
+	return true
+}
+
+func versionReadStatus(err error) int {
+	if errors.Is(err, rulesrepo.ErrInvalidVersion) {
+		return http.StatusBadRequest
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
 }
 
 func atoi(s string, def int) int {
